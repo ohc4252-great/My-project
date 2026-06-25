@@ -113,7 +113,14 @@ namespace StarForge.Presentation
             debrisRotation.z = new ParticleSystem.MinMaxCurve(-7f, 7f);
             ParticleSystemRenderer debrisRenderer = chargeDebris.GetComponent<ParticleSystemRenderer>();
             debrisRenderer.renderMode = ParticleSystemRenderMode.Mesh;
-            debrisRenderer.SetMeshes(StarForgeVisualLibrary.GetRockMeshes());
+            Mesh[] rockMeshes = StarForgeVisualLibrary.GetRockMeshes();
+            int particleMeshCount = Mathf.Min(4, rockMeshes.Length);
+            Mesh[] particleMeshes = new Mesh[particleMeshCount];
+            System.Array.Copy(
+                rockMeshes,
+                particleMeshes,
+                particleMeshCount);
+            debrisRenderer.SetMeshes(particleMeshes);
             debrisRenderer.material = StarForgeVisualLibrary.CreateParticleMaterial(
                 Color.white, false, Texture2D.whiteTexture);
             chargeDebris.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
@@ -129,7 +136,11 @@ namespace StarForge.Presentation
             EnsureShardMaterials();
         }
 
-        public IEnumerator PlayShardFly(Transform target, int shardCount, float duration, int level = 0)
+        public IEnumerator PlayShardFly(
+            Transform target,
+            int shardCount,
+            float duration,
+            int level = 0)
         {
             EnsureCreated();
 
@@ -342,8 +353,12 @@ namespace StarForge.Presentation
                 }
             }
 
-            chargeGather.Stop(true, ParticleSystemStopBehavior.StopEmitting);
-            chargeDebris.Stop(true, ParticleSystemStopBehavior.StopEmitting);
+            chargeGather.Stop(
+                true,
+                ParticleSystemStopBehavior.StopEmitting);
+            chargeDebris.Stop(
+                true,
+                ParticleSystemStopBehavior.StopEmitting);
             flashLight.intensity = 0f;
         }
 
@@ -535,7 +550,16 @@ namespace StarForge.Presentation
 
             ParticleSystemRenderer renderer = particles.GetComponent<ParticleSystemRenderer>();
             renderer.renderMode = ParticleSystemRenderMode.Mesh;
-            renderer.SetMeshes(StarForgeVisualLibrary.GetRockMeshes());
+            // ParticleSystemRenderer.SetMeshes는 최대 4개까지만 허용하므로 잘라서 넘긴다.
+            Mesh[] rockMeshes = StarForgeVisualLibrary.GetRockMeshes();
+            if (rockMeshes.Length > 4)
+            {
+                Mesh[] clamped = new Mesh[4];
+                System.Array.Copy(rockMeshes, clamped, 4);
+                rockMeshes = clamped;
+            }
+
+            renderer.SetMeshes(rockMeshes);
             renderer.material = StarForgeVisualLibrary.CreateParticleMaterial(
                 Color.white, false, Texture2D.whiteTexture);
             renderer.trailMaterial = StarForgeVisualLibrary.CreateParticleMaterial(

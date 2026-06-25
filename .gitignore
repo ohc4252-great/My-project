@@ -105,3 +105,23 @@ InitTestScene*.unity*
 
 # Auto-generated scenes by play mode tests
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
+
+# Generated iOS Xcode project (created by Unity/Codemagic during CI)
+/ios/
+*.ipa
+*.xcarchive
+
+# Keystore / signing secrets — never commit
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+
+# Local tooling / temp / working artifacts (not part of the game version)
+/tmp/
+/.codex/
+/.codex-remote-attachments/
+/(motion-routine)/
+/AudioBackup_original/
+/새 텍스트 문서.txt

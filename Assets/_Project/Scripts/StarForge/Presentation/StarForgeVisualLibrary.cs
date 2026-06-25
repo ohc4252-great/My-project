@@ -59,6 +59,176 @@ namespace StarForge.Presentation
         }
 
         private static Mesh[] rockMeshes;
+        private static Mesh heartMesh;
+        private static Mesh catHeadMesh;
+
+        /// <summary>구를 변형해 만든 3D 하트 메시. UV는 구와 동일해 행성 텍스처가 그대로 입혀집니다.</summary>
+        public static Mesh GetHeartMesh()
+        {
+            if (heartMesh != null)
+            {
+                return heartMesh;
+            }
+
+            // 파라메트릭 하트 곡선 → 각도별 반지름 LUT
+            const int LutSize = 256;
+            float[] lut = new float[LutSize];
+            for (int i = 0; i < LutSize; i++)
+            {
+                lut[i] = -1f;
+            }
+
+            for (int s = 0; s < 2048; s++)
+            {
+                float t = s / 2048f * Mathf.PI * 2f;
+                float x = 16f * Mathf.Pow(Mathf.Sin(t), 3f);
+                float y = 13f * Mathf.Cos(t) - 5f * Mathf.Cos(2f * t) - 2f * Mathf.Cos(3f * t) - Mathf.Cos(4f * t);
+                x /= 17f;
+                y /= 17f;
+                float angle = Mathf.Atan2(y, x);
+                int bin = Mathf.Clamp(Mathf.FloorToInt((angle + Mathf.PI) / (Mathf.PI * 2f) * LutSize), 0, LutSize - 1);
+                float radius = Mathf.Sqrt(x * x + y * y);
+                if (radius > lut[bin])
+                {
+                    lut[bin] = radius;
+                }
+            }
+
+            // 빈 구간 채우기 + 부드럽게
+            for (int i = 0; i < LutSize; i++)
+            {
+                if (lut[i] < 0f)
+                {
+                    int prev = i;
+                    while (lut[(prev + LutSize - 1) % LutSize] < 0f) { prev--; }
+                    lut[i] = lut[(prev + LutSize - 1) % LutSize];
+                }
+            }
+
+            for (int pass = 0; pass < 3; pass++)
+            {
+                float[] smooth = new float[LutSize];
+                for (int i = 0; i < LutSize; i++)
+                {
+                    smooth[i] = (lut[(i + LutSize - 1) % LutSize] + lut[i] * 2f + lut[(i + 1) % LutSize]) * 0.25f;
+                }
+
+                lut = smooth;
+            }
+
+            Mesh source = GetPrimitiveMesh(PrimitiveType.Sphere);
+            Vector3[] vertices = source.vertices;
+            Vector3[] deformed = new Vector3[vertices.Length];
+            for (int i = 0; i < vertices.Length; i++)
+            {
+                Vector3 unit = vertices[i] * 2f; // 구 반지름 0.5 → 단위 구
+                float angle = Mathf.Atan2(unit.y, unit.x);
+                int bin = Mathf.Clamp(Mathf.FloorToInt((angle + Mathf.PI) / (Mathf.PI * 2f) * LutSize), 0, LutSize - 1);
+                float radial = Mathf.Lerp(0.5f, 1.05f, Mathf.Clamp01(lut[bin]));
+                float depth = 0.74f * Mathf.Lerp(0.62f, 1f, Mathf.Clamp01(lut[bin]));
+                deformed[i] = new Vector3(unit.x * radial, unit.y * radial, unit.z * depth) * 0.52f;
+            }
+
+            heartMesh = new Mesh();
+            heartMesh.name = "StarForge Heart";
+            heartMesh.vertices = deformed;
+            heartMesh.uv = source.uv;
+            heartMesh.triangles = source.triangles;
+            heartMesh.RecalculateNormals();
+            heartMesh.RecalculateBounds();
+            return heartMesh;
+        }
+
+        public static Mesh GetCatHeadMesh()
+        {
+            if (catHeadMesh != null)
+            {
+                return catHeadMesh;
+            }
+
+            const int LongitudeSegments = 64;
+            const int LatitudeSegments = 36;
+            int rowLength = LongitudeSegments + 1;
+            Vector3[] vertices = new Vector3[rowLength * (LatitudeSegments + 1)];
+            Vector2[] uv = new Vector2[vertices.Length];
+            int[] triangles = new int[LongitudeSegments * LatitudeSegments * 6];
+
+            for (int latitude = 0; latitude <= LatitudeSegments; latitude++)
+            {
+                float v = (float)latitude / LatitudeSegments;
+                float phi = v * Mathf.PI;
+                float sinPhi = Mathf.Sin(phi);
+                float cosPhi = Mathf.Cos(phi);
+
+                for (int longitude = 0; longitude <= LongitudeSegments; longitude++)
+                {
+                    float u = (float)longitude / LongitudeSegments;
+                    float theta = u * Mathf.PI * 2f;
+                    Vector3 point = new Vector3(
+                        Mathf.Sin(theta) * sinPhi,
+                        cosPhi,
+                        Mathf.Cos(theta) * sinPhi);
+
+                    point = DeformCatHead(point);
+                    int index = latitude * rowLength + longitude;
+                    vertices[index] = point;
+                    uv[index] = new Vector2(u, 1f - v);
+                }
+            }
+
+            int triangleIndex = 0;
+            for (int latitude = 0; latitude < LatitudeSegments; latitude++)
+            {
+                for (int longitude = 0; longitude < LongitudeSegments; longitude++)
+                {
+                    int current = latitude * rowLength + longitude;
+                    int next = current + rowLength;
+
+                    triangles[triangleIndex++] = current;
+                    triangles[triangleIndex++] = next;
+                    triangles[triangleIndex++] = current + 1;
+                    triangles[triangleIndex++] = current + 1;
+                    triangles[triangleIndex++] = next;
+                    triangles[triangleIndex++] = next + 1;
+                }
+            }
+
+            catHeadMesh = new Mesh();
+            catHeadMesh.name = "StarForge Integrated Cat Head";
+            catHeadMesh.vertices = vertices;
+            catHeadMesh.uv = uv;
+            catHeadMesh.triangles = triangles;
+            catHeadMesh.RecalculateNormals();
+            catHeadMesh.RecalculateTangents();
+            catHeadMesh.RecalculateBounds();
+            return catHeadMesh;
+        }
+
+        private static Vector3 DeformCatHead(Vector3 unit)
+        {
+            Vector3 point = new Vector3(
+                unit.x * 0.52f,
+                unit.y * 0.5f,
+                unit.z * 0.46f);
+
+            float upperMask = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.08f, 0.5f, point.y));
+            float depthMask = Mathf.Exp(-(point.z * point.z) / 0.12f);
+            float leftEar = Mathf.Exp(-Mathf.Pow(point.x + 0.29f, 2f) / 0.011f) * upperMask * depthMask;
+            float rightEar = Mathf.Exp(-Mathf.Pow(point.x - 0.29f, 2f) / 0.011f) * upperMask * depthMask;
+            float ear = Mathf.Max(leftEar, rightEar);
+
+            point.y += ear * (0.31f + 0.09f * upperMask);
+            point.x += (rightEar - leftEar) * 0.045f;
+            point.z *= 1f - ear * 0.18f;
+
+            float crownMask = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.28f, 0.5f, point.y));
+            float centerNotch = Mathf.Exp(-(point.x * point.x) / 0.018f) * crownMask * depthMask;
+            point.y -= centerNotch * 0.1f;
+
+            float cheekMask = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(-0.12f, -0.42f, point.y));
+            point.x *= 1f - cheekMask * 0.06f;
+            return point;
+        }
 
         public static Mesh[] GetRockMeshes()
         {
@@ -338,6 +508,60 @@ namespace StarForge.Presentation
             return material;
         }
 
+        public static Material CreateBlackHoleCoreMaterial()
+        {
+            Shader shader = Shader.Find("StarForge/BlackHoleCore");
+            if (shader == null || !shader.isSupported)
+            {
+                shader = Shader.Find("Universal Render Pipeline/Unlit");
+            }
+
+            Material material = new Material(shader);
+            material.name = "StarForge Black Hole Core";
+            SetMaterialColor(material, new Color(0.001f, 0.001f, 0.003f, 1f));
+            material.renderQueue = (int)RenderQueue.Geometry;
+            return material;
+        }
+
+        public static Material CreateBlackHoleDiskMaterial()
+        {
+            Shader shader = Shader.Find("StarForge/BlackHoleDisk");
+            if (shader == null || !shader.isSupported)
+            {
+                return CreateParticleMaterial(Color.white, true, PlanetRingTexture);
+            }
+
+            Material material = new Material(shader);
+            material.name = "StarForge Black Hole Disk";
+            return material;
+        }
+
+        public static Material CreateBlackHoleInfallMaterial()
+        {
+            Shader shader = Shader.Find("StarForge/BlackHoleInfall");
+            if (shader == null || !shader.isSupported)
+            {
+                return CreateParticleMaterial(Color.clear, true);
+            }
+
+            Material material = new Material(shader);
+            material.name = "StarForge Black Hole Infall";
+            return material;
+        }
+
+        public static Material CreatePremiumRimMaterial()
+        {
+            Shader shader = Shader.Find("StarForge/PremiumRim");
+            if (shader == null || !shader.isSupported)
+            {
+                return CreateParticleMaterial(Color.clear, true, Texture2D.whiteTexture);
+            }
+
+            Material material = new Material(shader);
+            material.name = "StarForge Premium Rim";
+            return material;
+        }
+
         public static void SetMaterialColor(Material material, Color color)
         {
             if (material == null)
@@ -365,8 +589,18 @@ namespace StarForge.Presentation
             }
 
             GameObject temp = GameObject.CreatePrimitive(type);
-            mesh = temp.GetComponent<MeshFilter>().sharedMesh;
-            Object.Destroy(temp);
+            Mesh sourceMesh = temp.GetComponent<MeshFilter>().sharedMesh;
+            mesh = Object.Instantiate(sourceMesh);
+            mesh.name = sourceMesh.name;
+            if (Application.isPlaying)
+            {
+                Object.Destroy(temp);
+            }
+            else
+            {
+                Object.DestroyImmediate(temp);
+            }
+
             primitiveMeshes[type] = mesh;
             return mesh;
         }
@@ -408,6 +642,58 @@ namespace StarForge.Presentation
 
             Mesh mesh = new Mesh();
             mesh.name = "StarForge Ring";
+            mesh.vertices = vertices;
+            mesh.normals = normals;
+            mesh.uv = uv;
+            mesh.triangles = triangles;
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        public static Mesh CreateArcMesh(
+            float innerRadius,
+            float outerRadius,
+            int segments,
+            float startAngleDegrees,
+            float arcAngleDegrees,
+            float uvRepeat)
+        {
+            segments = Mathf.Max(2, segments);
+            int vertexCount = (segments + 1) * 2;
+            Vector3[] vertices = new Vector3[vertexCount];
+            Vector3[] normals = new Vector3[vertexCount];
+            Vector2[] uv = new Vector2[vertexCount];
+            int[] triangles = new int[segments * 6];
+
+            for (int i = 0; i <= segments; i++)
+            {
+                float t = (float)i / segments;
+                float angle = (startAngleDegrees + arcAngleDegrees * t) * Mathf.Deg2Rad;
+                float cos = Mathf.Cos(angle);
+                float sin = Mathf.Sin(angle);
+
+                vertices[i * 2] = new Vector3(cos * innerRadius, 0f, sin * innerRadius);
+                vertices[i * 2 + 1] = new Vector3(cos * outerRadius, 0f, sin * outerRadius);
+                normals[i * 2] = Vector3.up;
+                normals[i * 2 + 1] = Vector3.up;
+                uv[i * 2] = new Vector2(t * uvRepeat, 0f);
+                uv[i * 2 + 1] = new Vector2(t * uvRepeat, 1f);
+            }
+
+            for (int i = 0; i < segments; i++)
+            {
+                int baseIndex = i * 6;
+                int v = i * 2;
+                triangles[baseIndex] = v;
+                triangles[baseIndex + 1] = v + 1;
+                triangles[baseIndex + 2] = v + 2;
+                triangles[baseIndex + 3] = v + 1;
+                triangles[baseIndex + 4] = v + 3;
+                triangles[baseIndex + 5] = v + 2;
+            }
+
+            Mesh mesh = new Mesh();
+            mesh.name = "StarForge Energy Arc";
             mesh.vertices = vertices;
             mesh.normals = normals;
             mesh.uv = uv;

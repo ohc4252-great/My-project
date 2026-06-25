@@ -1,6 +1,6 @@
 # 별 강화하기 스토어 제출 체크리스트
 
-기준일: 2026-06-16
+기준일: 2026-06-19
 
 이 문서는 현재 앱 구조를 기준으로 한다.
 
@@ -8,6 +8,8 @@
 - 서버 저장 없음
 - Google AdMob 보상형 광고 있음
 - 게임 진행/설정/약관 동의는 PlayerPrefs 로컬 저장
+- 출시 버전: Android `versionName 1.0.0` / `versionCode 1`, iOS `1.0.0 (1)`
+- 출시 저장 키는 `StarForge.SaveData.v2`이며, 기존 테스트 저장 데이터는 출시 데이터로 이관하지 않는다.
 - Android App ID: `ca-app-pub-3971219491693844~8174680087`
 - iOS App ID: `ca-app-pub-3971219491693844~2351507763`
 - Android 탐험/게임 횟수 +1 Rewarded: `ca-app-pub-3971219491693844/1293240258`
@@ -46,7 +48,8 @@ GitHub Pages 배포 상태:
 주의:
 
 - 이 동의 UI는 일반 약관/개인정보 고지 동의다.
-- EEA/영국/스위스 또는 미국 일부 주 개인정보 규제 대응용 광고 동의는 Google UMP SDK 흐름을 별도로 붙이는 것이 안전하다.
+- 앱 시작 시 Google UMP SDK가 동의 상태를 갱신하고, 필요한 경우 동의 양식을 표시한 뒤에만 광고 SDK를 초기화한다.
+- 설정 화면의 `광고 개인정보 설정`에서 UMP가 요구하는 경우 광고 개인정보 선택지를 다시 열 수 있다.
 
 ## 3. Google Play Console 데이터 보안 섹션 초안
 
@@ -113,7 +116,7 @@ App Store 필수 링크:
 ATT:
 
 - 개인화 광고 또는 광고 ID 기반 추적을 사용하는 경우 `NSUserTrackingUsageDescription`과 ATT 권한 요청 흐름을 검토해야 한다.
-- 현재 코드에는 ATT 팝업 구현이 없다. iOS 출시 전 UMP + ATT 정책 플로우를 추가하는 것이 안전하다.
+- 현재 앱은 ATT 권한을 요청하지 않는다. App Store Connect 개인정보 라벨은 실제 AdMob 계정의 광고 개인화·추적 설정과 일치하게 최종 선택해야 한다. 추적 기반 개인화 광고를 활성화할 경우 ATT 권한 요청 구현과 `NSUserTrackingUsageDescription`을 추가한다.
 
 ## 5. AdMob/광고 정책 체크
 
@@ -150,9 +153,11 @@ Play Console 입력 권장:
 - Google Mobile Ads Unity Plugin 설치 확인
 - External Dependency Manager Android Resolver 실행
 - Android `com.google.android.gms.permission.AD_ID` 반영 확인
-- Android min/target SDK와 Play 정책 확인
+- Android target SDK 35 및 ARM64 설정 확인
+- Android 업로드 키스토어를 설정한 뒤 AAB를 생성
 - iOS App ID와 ad unit ID 반영 확인
 - iOS 빌드 후 Info.plist의 `GADApplicationIdentifier` 확인
+- iOS 배포 인증서, 프로비저닝 프로파일, App Store Connect 앱 레코드와 Apple ID를 Codemagic에 연결
 - 개인정보처리방침 URL 공개 접속 확인
 - 이용약관 URL 공개 접속 확인
 - 설정 화면 링크가 실제 기기에서 브라우저로 열리는지 확인

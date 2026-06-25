@@ -104,11 +104,93 @@ namespace StarForge.Core
 
             saveData.currentLevel = config.level;
             saveData.highestLevel = Math.Max(saveData.highestLevel, config.level);
-            saveData.isFractured = false;
+            saveData.ResetFractures();
             saveData.reviveCount++;
+            // 파괴된 그 행성을 되살리므로 이전 모양을 복원
+            saveData.planetShape = saveData.lastDestroyedShape;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                config.level,
+                balance.maxLevel);
 
             result.success = true;
             result.message = config.level + "강에서 부활했습니다.";
+            return result;
+        }
+
+        public StarForgeReviveResult TryKeepDestroyedLevel(
+            StarForgeSaveData saveData,
+            int destroyedLevel,
+            CurrencyAmount[] destructionRewards)
+        {
+            StarForgeReviveResult result = new StarForgeReviveResult();
+            result.level = destroyedLevel;
+
+            if (saveData == null ||
+                destroyedLevel <= 0 ||
+                saveData.currentLevel != 0)
+            {
+                result.message = "유지할 수 있는 파괴 단계가 없습니다.";
+                return result;
+            }
+
+            if (destructionRewards != null)
+            {
+                int[] rollbackAmounts = new int[5];
+                for (int i = 0; i < destructionRewards.Length; i++)
+                {
+                    CurrencyAmount reward = destructionRewards[i];
+                    if (reward == null || reward.amount <= 0)
+                    {
+                        continue;
+                    }
+
+                    int currencyIndex = (int)reward.type;
+                    if (currencyIndex < 0 ||
+                        currencyIndex >= rollbackAmounts.Length)
+                    {
+                        result.message = "파괴 회수 보상 정보가 올바르지 않습니다.";
+                        return result;
+                    }
+
+                    rollbackAmounts[currencyIndex] += reward.amount;
+                }
+
+                for (int i = 0; i < rollbackAmounts.Length; i++)
+                {
+                    if (saveData.GetCurrency((StarForgeCurrencyType)i) <
+                        rollbackAmounts[i])
+                    {
+                        result.message = "파괴 회수 보상을 되돌릴 수 없습니다.";
+                        return result;
+                    }
+                }
+
+                for (int i = 0; i < rollbackAmounts.Length; i++)
+                {
+                    if (rollbackAmounts[i] > 0)
+                    {
+                        saveData.TrySpendCurrency(
+                            (StarForgeCurrencyType)i,
+                            rollbackAmounts[i]);
+                    }
+                }
+            }
+
+            saveData.currentLevel = destroyedLevel;
+            saveData.highestLevel = Math.Max(
+                saveData.highestLevel,
+                destroyedLevel);
+            saveData.planetShape = saveData.lastDestroyedShape;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                destroyedLevel,
+                Math.Max(saveData.highestLevel, destroyedLevel));
+            saveData.ResetFractures();
+            saveData.reviveCount++;
+
+            result.success = true;
+            result.message = destroyedLevel + "강 단계를 유지했습니다.";
             return result;
         }
     }

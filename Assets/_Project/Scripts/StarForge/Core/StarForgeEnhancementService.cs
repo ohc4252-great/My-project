@@ -6,6 +6,10 @@ namespace StarForge.Core
 {
     public sealed class StarForgeEnhancementService
     {
+        private const float BaseDestructionChancePercent = 0f;
+        private const float DestructionChancePerFracturePercent = 10f;
+        private const float MaximumOutcomeChancePercent = 100f;
+
         public StarForgeEnhancementResult TryEnhance(
             StarForgeSaveData saveData,
             StarForgeBalance balance,
@@ -76,8 +80,12 @@ namespace StarForge.Core
                 balance.TryGetCost(saveData.currentLevel, currencyType, out preview.cost);
 
             preview.hasEnoughCurrency = saveData.GetCurrency(currencyType) >= preview.cost;
-            preview.fractureChancePercent = attempt.fractureChancePercent;
-            preview.destructionChancePercent = GetEffectiveDestructionChance(saveData, balance, attempt);
+            FailureDistribution distribution =
+                GetFailureDistribution(saveData, attempt);
+            preview.fractureChancePercent =
+                distribution.fractureChancePercent;
+            preview.destructionChancePercent =
+                distribution.destructionChancePercent;
             return preview;
         }
 
@@ -103,7 +111,11 @@ namespace StarForge.Core
 
             saveData.currentLevel = newLevel;
             saveData.highestLevel = Math.Max(saveData.highestLevel, newLevel);
-            saveData.isFractured = false;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                newLevel,
+                balance.maxLevel);
+            saveData.ResetFractures();
             saveData.successCount++;
 
             result.message = result.kind == StarForgeResultKind.GreatSuccess
@@ -150,12 +162,19 @@ namespace StarForge.Core
             Func<float> roll01,
             StarForgeEnhancementResult result)
         {
-            result.destructionChancePercent = GetEffectiveDestructionChance(saveData, balance, attempt);
-            result.fractureChancePercent = attempt.fractureChancePercent;
+            FailureDistribution distribution =
+                GetFailureDistribution(saveData, attempt);
+            result.destructionChancePercent =
+                distribution.destructionChancePercent;
+            result.fractureChancePercent =
+                distribution.fractureChancePercent;
 
-            float destructionChance = saveData.currentLevel > 0 ? result.destructionChancePercent : 0f;
-            float fractureChance = Math.Max(0f, result.fractureChancePercent);
-            float failureChance = Math.Max(0f, 100f - fractureChance - destructionChance);
+            float destructionChance =
+                distribution.destructionChancePercent;
+            float fractureChance =
+                distribution.fractureChancePercent;
+            float failureChance =
+                distribution.failureChancePercent;
             float outcomeRoll = RollPercent(roll01);
 
             if (outcomeRoll < failureChance)
@@ -169,15 +188,18 @@ namespace StarForge.Core
 
             if (outcomeRoll < failureChance + fractureChance)
             {
-                saveData.isFractured = true;
+                saveData.AddFracture();
                 result.kind = StarForgeResultKind.Fracture;
-                result.message = "균열 발생. 다음 도전이 더 위험해집니다.";
+                result.message =
+                    "균열 발생. 누적 " +
+                    saveData.fractureCount +
+                    "회로 소멸 위험이 증가했습니다.";
                 return;
             }
 
             if (destructionChance > 0f)
             {
-                ApplyDestroyed(saveData, attempt, result);
+                ApplyDestroyed(saveData, balance, roll01, result);
                 return;
             }
 
@@ -187,17 +209,18 @@ namespace StarForge.Core
 
         private static void ApplyDestroyed(
             StarForgeSaveData saveData,
-            AttemptBalance attempt,
+            StarForgeBalance balance,
+            Func<float> roll01,
             StarForgeEnhancementResult result)
         {
             result.kind = StarForgeResultKind.Destroyed;
-            result.rewards = attempt.destructionReward;
+            result.rewards = BuildDestructionRewards(saveData, balance);
 
-            if (attempt.destructionReward != null)
+            if (result.rewards != null)
             {
-                for (int i = 0; i < attempt.destructionReward.Length; i++)
+                for (int i = 0; i < result.rewards.Length; i++)
                 {
-                    CurrencyAmount reward = attempt.destructionReward[i];
+                    CurrencyAmount reward = result.rewards[i];
                     if (reward != null)
                     {
                         saveData.AddCurrency(reward.type, reward.amount);
@@ -205,26 +228,200 @@ namespace StarForge.Core
                 }
             }
 
+            // 새 0강 행성: 이전 모양은 부활용으로 보관하고 모양을 재추첨
+            saveData.lastDestroyedShape = saveData.planetShape;
+            saveData.planetShape = (int)StarForgePlanetShapes.Roll(balance.shapeChancesPercent, roll01);
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                0,
+                balance.maxLevel);
+
             saveData.currentLevel = 0;
-            saveData.isFractured = false;
+            saveData.ResetFractures();
             saveData.destructionCount++;
 
             result.newLevel = 0;
             result.message = "소멸. 남은 재료를 회수했습니다.";
         }
 
-        private static float GetEffectiveDestructionChance(
+        /// <summary>행성 분해: 현 단계 가치만큼 재화를 받고 0강 새 행성(모양 재추첨)으로 시작합니다.</summary>
+        public StarForgeDisassembleResult TryDisassemble(
             StarForgeSaveData saveData,
             StarForgeBalance balance,
-            AttemptBalance attempt)
+            Func<float> roll01)
         {
+            StarForgeDisassembleResult result = new StarForgeDisassembleResult();
+            result.level = saveData.currentLevel;
+
             if (saveData.currentLevel <= 0)
             {
-                return 0f;
+                result.message = "0강 행성은 분해할 수 없습니다.";
+                return result;
             }
 
-            float chance = Math.Max(0f, attempt.destructionChancePercent);
-            return Math.Min(100f, chance);
+            CurrencyAmount[] rewards = GetDisassembleRewards(saveData, balance);
+            if (rewards == null || rewards.Length == 0)
+            {
+                result.message = "이 단계는 분해 보상이 없습니다.";
+                return result;
+            }
+
+            for (int i = 0; i < rewards.Length; i++)
+            {
+                if (rewards[i] != null)
+                {
+                    saveData.AddCurrency(rewards[i].type, rewards[i].amount);
+                }
+            }
+
+            result.rewards = rewards;
+            result.previousShape = (StarForgePlanetShape)saveData.planetShape;
+
+            saveData.planetShape = (int)StarForgePlanetShapes.Roll(balance.shapeChancesPercent, roll01);
+            saveData.lastDestroyedShape = saveData.planetShape;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                0,
+                balance.maxLevel);
+            saveData.currentLevel = 0;
+            saveData.ResetFractures();
+
+            result.newShape = (StarForgePlanetShape)saveData.planetShape;
+            result.success = true;
+            result.message = "행성을 분해해 재료를 회수했습니다.";
+            return result;
+        }
+
+        public CurrencyAmount[] GetDisassembleRewards(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance)
+        {
+            return BuildDisassembleRewards(saveData, balance);
+        }
+
+        private static CurrencyAmount[] BuildDisassembleRewards(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance)
+        {
+            if (saveData == null || balance == null)
+            {
+                return null;
+            }
+
+            CurrencyAmount[] rewards =
+                balance.GetDisassembleReward(saveData.currentLevel);
+            if (rewards == null)
+            {
+                return null;
+            }
+
+            int multiplier = GetDisassembleRewardMultiplier(
+                (StarForgePlanetShape)saveData.planetShape);
+            CurrencyAmount[] multipliedRewards =
+                new CurrencyAmount[rewards.Length];
+            for (int i = 0; i < rewards.Length; i++)
+            {
+                CurrencyAmount reward = rewards[i];
+                if (reward == null)
+                {
+                    continue;
+                }
+
+                multipliedRewards[i] =
+                    new CurrencyAmount(reward.type, reward.amount * multiplier);
+            }
+
+            return multipliedRewards;
+        }
+
+        private static CurrencyAmount[] BuildDestructionRewards(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance)
+        {
+            CurrencyAmount[] disassembleRewards =
+                BuildDisassembleRewards(saveData, balance);
+            if (disassembleRewards == null)
+            {
+                return null;
+            }
+
+            CurrencyAmount[] destructionRewards =
+                new CurrencyAmount[disassembleRewards.Length];
+            for (int i = 0; i < disassembleRewards.Length; i++)
+            {
+                CurrencyAmount reward = disassembleRewards[i];
+                if (reward == null || reward.amount <= 0)
+                {
+                    continue;
+                }
+
+                destructionRewards[i] =
+                    new CurrencyAmount(
+                        reward.type,
+                        Math.Max(1, reward.amount / 2));
+            }
+
+            return destructionRewards;
+        }
+
+        private static int GetDisassembleRewardMultiplier(
+            StarForgePlanetShape shape)
+        {
+            switch (shape)
+            {
+                case StarForgePlanetShape.Heart:
+                    return 2;
+                case StarForgePlanetShape.Cat:
+                    return 3;
+                default:
+                    return 1;
+            }
+        }
+
+        private static FailureDistribution GetFailureDistribution(
+            StarForgeSaveData saveData,
+            AttemptBalance attempt)
+        {
+            FailureDistribution distribution =
+                new FailureDistribution();
+            float baseDestructionChance = BaseDestructionChancePercent;
+            float baseFractureChance = Math.Min(
+                MaximumOutcomeChancePercent - baseDestructionChance,
+                Math.Max(0f, attempt.fractureChancePercent));
+            float baseFailureChance = Math.Max(
+                0f,
+                MaximumOutcomeChancePercent -
+                baseDestructionChance -
+                baseFractureChance);
+
+            if (saveData.currentLevel <= 0)
+            {
+                distribution.failureChancePercent =
+                    baseFailureChance + baseDestructionChance;
+                distribution.fractureChancePercent =
+                    baseFractureChance;
+                distribution.destructionChancePercent = 0f;
+                return distribution;
+            }
+
+            float destructionIncrease = Math.Min(
+                MaximumOutcomeChancePercent - baseDestructionChance,
+                Math.Max(0, saveData.fractureCount) *
+                DestructionChancePerFracturePercent);
+            float failureReduction = Math.Min(
+                baseFailureChance,
+                destructionIncrease);
+
+            distribution.failureChancePercent =
+                baseFailureChance - failureReduction;
+            distribution.destructionChancePercent =
+                baseDestructionChance + destructionIncrease;
+            distribution.fractureChancePercent = Math.Max(
+                0f,
+                MaximumOutcomeChancePercent -
+                distribution.failureChancePercent -
+                distribution.destructionChancePercent);
+            return distribution;
         }
 
         private static float RollPercent(Func<float> roll01)
@@ -235,6 +432,13 @@ namespace StarForge.Core
             }
 
             return Math.Max(0f, Math.Min(1f, roll01())) * 100f;
+        }
+
+        private struct FailureDistribution
+        {
+            public float failureChancePercent;
+            public float fractureChancePercent;
+            public float destructionChancePercent;
         }
     }
 
@@ -250,6 +454,16 @@ namespace StarForge.Core
         public float fractureChancePercent;
         public float destructionChancePercent;
         public CurrencyAmount[] rewards;
+        public string message;
+    }
+
+    public sealed class StarForgeDisassembleResult
+    {
+        public bool success;
+        public int level;
+        public CurrencyAmount[] rewards;
+        public StarForgePlanetShape previousShape;
+        public StarForgePlanetShape newShape;
         public string message;
     }
 

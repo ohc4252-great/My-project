@@ -19,6 +19,18 @@ namespace StarForge.EditorTools
                 importer.defaultSampleSettings = settings;
                 importer.loadInBackground = true;
             }
+            else if (path.Contains("_Project/Resources/Audio/") &&
+                     (path.ToLowerInvariant().EndsWith("/main.mp3") ||
+                      path.ToLowerInvariant().EndsWith("/game.mp3")))
+            {
+                AudioImporterSampleSettings settings = importer.defaultSampleSettings;
+                settings.loadType = AudioClipLoadType.Streaming;
+                settings.compressionFormat = AudioCompressionFormat.Vorbis;
+                settings.quality = 0.7f;
+                importer.defaultSampleSettings = settings;
+                importer.loadInBackground = true;
+                importer.forceToMono = false;
+            }
             else if (path.Contains("_Project/Resources/Audio/"))
             {
                 AudioImporterSampleSettings settings = importer.defaultSampleSettings;

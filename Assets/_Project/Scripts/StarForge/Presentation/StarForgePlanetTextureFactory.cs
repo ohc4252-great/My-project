@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using StarForge.Core;
 using UnityEngine;
 
 namespace StarForge.Presentation
@@ -21,6 +22,10 @@ namespace StarForge.Presentation
         public StarForgePlanetTheme theme;
         public Texture2D baseMap;
         public Texture2D emissionMap;
+        /// <summary>레퍼런스 이미지에서 추출한 텍스처인지 여부 (얼굴/발광 처리 분기용)</summary>
+        public bool isImageBased;
+        /// <summary>앞면 언랩 텍스처라 얼굴이 이미 그려져 있는지 여부</summary>
+        public bool hasBakedFace;
     }
 
     public static class StarForgePlanetTextureFactory
@@ -52,25 +57,66 @@ namespace StarForge.Presentation
                 return StarForgePlanetTheme.Gas;
             }
 
-            if (level <= 27)
-            {
-                return StarForgePlanetTheme.Star;
-            }
-
-            return StarForgePlanetTheme.BlackHole;
+            return StarForgePlanetTheme.Star;
         }
 
         public static StarForgePlanetSurface Get(int level, Color baseColor)
         {
+            return Get(level, baseColor, StarForgePlanetShape.Default);
+        }
+
+        public static StarForgePlanetSurface Get(int level, Color baseColor, StarForgePlanetShape shape)
+        {
+            int key = (int)shape * 1000 + level;
             StarForgePlanetSurface surface;
-            if (cache.TryGetValue(level, out surface) && surface != null && surface.baseMap != null)
+            if (cache.TryGetValue(key, out surface) && surface != null && surface.baseMap != null)
             {
                 return surface;
             }
 
-            surface = Generate(level, baseColor);
-            cache[level] = surface;
+            surface = LoadImageSurface(level, shape) ?? Generate(level, baseColor);
+            cache[key] = surface;
             return surface;
+        }
+
+        /// <summary>레퍼런스 이미지에서 추출해 둔 구면 텍스처를 우선 사용합니다. (Resources/PlanetSurfaces/D|H|C{1~27})</summary>
+        private static StarForgePlanetSurface LoadImageSurface(int level, StarForgePlanetShape shape)
+        {
+            string prefix = GetShapePrefix(shape);
+            Texture2D texture = Resources.Load<Texture2D>("PlanetSurfaces/" + prefix + Mathf.Max(1, level));
+            if (texture == null)
+            {
+                return null;
+            }
+
+            StarForgePlanetSurface surface = new StarForgePlanetSurface();
+            surface.theme = GetTheme(level);
+            surface.baseMap = texture;
+            surface.emissionMap = surface.theme == StarForgePlanetTheme.Lava
+                || surface.theme == StarForgePlanetTheme.Star
+                ? texture
+                : null;
+            surface.isImageBased = true;
+            surface.hasBakedFace = false;
+            return surface;
+        }
+
+        /// <summary>블랙홀(28~30) 정면 데칼 텍스처. 없으면 null.</summary>
+        public static Texture2D GetBlackHoleFace(int level, StarForgePlanetShape shape)
+        {
+            if (level < 28)
+            {
+                return null;
+            }
+
+            return Resources.Load<Texture2D>("PlanetSurfaces/BH" + GetShapePrefix(shape) + level);
+        }
+
+        private static string GetShapePrefix(StarForgePlanetShape shape)
+        {
+            return shape == StarForgePlanetShape.Heart
+                ? "H"
+                : shape == StarForgePlanetShape.Cat ? "C" : "D";
         }
 
         private static StarForgePlanetSurface Generate(int level, Color baseColor)
@@ -131,10 +177,43 @@ namespace StarForge.Presentation
                 {
                     float n = Fbm(u, v, 3.2f, 4, seed);
                     float detail = Fbm(u, v, 7f, 2, seed + 50f);
+
+                    if (level <= 0)
+                    {
+                        // 우주 먼지: 곱고 흐릿한 입자 덩어리
+                        float fine = Fbm(u, v, 12f, 2, seed + 5f);
+                        baseCol = baseColor * (0.62f + 0.3f * n + 0.18f * fine);
+                        baseCol = Color.Lerp(baseCol, new Color(0.6f, 0.62f, 0.7f), 0.25f);
+                        break;
+                    }
+
                     baseCol = baseColor * (0.5f + 0.55f * n);
                     if (detail > 0.62f)
                     {
                         baseCol *= 0.8f;
+                    }
+
+                    if (level <= 4)
+                    {
+                        // 운석 단계: 충돌 크레이터가 뚜렷하게
+                        ApplyCraters(ref baseCol, u, v, seed, 3 + level * 2, 0.035f, 0.085f);
+                    }
+                    else
+                    {
+                        // 소행성 단계: 크레이터는 줄고 광맥이 드러남
+                        ApplyCraters(ref baseCol, u, v, seed, 4, 0.025f, 0.05f);
+                        if (level >= 6)
+                        {
+                            float ridge = 1f - Mathf.Abs(2f * Fbm(u, v, 5f, 3, seed + 77f) - 1f);
+                            float vein = Mathf.InverseLerp(0.86f, 0.97f, ridge);
+                            if (vein > 0f)
+                            {
+                                Color metal = level >= 7
+                                    ? new Color(1f, 0.85f, 0.45f)
+                                    : new Color(0.8f, 0.76f, 0.7f);
+                                baseCol = Color.Lerp(baseCol, metal, vein * 0.55f);
+                            }
+                        }
                     }
 
                     break;
@@ -146,7 +225,15 @@ namespace StarForge.Presentation
                     float crack = Fbm(u, v, 9f, 2, seed + 9f);
                     if (crack > 0.68f)
                     {
-                        baseCol *= 0.82f;
+                        // 깊은 빙하 균열: 푸른 속살이 비치도록
+                        float depth = Mathf.InverseLerp(0.68f, 0.85f, crack);
+                        baseCol = Color.Lerp(baseCol * 0.86f, new Color(0.25f, 0.55f, 0.8f), depth * 0.5f);
+                    }
+
+                    float polar = Mathf.Abs(v - 0.5f) * 2f;
+                    if (polar > 0.78f)
+                    {
+                        baseCol = Color.Lerp(baseCol, Color.white, Mathf.InverseLerp(0.78f, 0.95f, polar) * 0.6f);
                     }
 
                     break;
@@ -248,31 +335,34 @@ namespace StarForge.Presentation
                 }
                 case StarForgePlanetTheme.Star:
                 {
-                    float g = Fbm(u, v, 5.5f, 4, seed);
-                    g = Mathf.Clamp01(g * g * 1.5f);
-
-                    Color cool = baseColor * 0.75f;
-                    Color hot = Color.Lerp(baseColor, Color.white, 0.65f);
-                    baseCol = Color.Lerp(cool, hot, g);
-
-                    if (level >= 17 && level <= 21)
-                    {
-                        float spot = Fbm(u, v, 3f, 3, seed + 31f);
-                        if (spot > 0.78f)
-                        {
-                            baseCol *= 0.5f;
-                        }
-                    }
-
-                    emissionCol = baseCol * (0.55f + 0.6f * g);
+                    ShadeStar(level, u, v, baseColor, seed, out baseCol, out emissionCol);
                     break;
                 }
                 default:
                 {
+                    // 블랙홀 28~30: 갈수록 어둡고, 빛은 가장자리로 응축
                     float n = Fbm(u, v, 4f, 3, seed);
-                    baseCol = Color.Lerp(Color.black, new Color(0.16f, 0.1f, 0.3f), n * 0.4f);
-                    float swirl = n > 0.7f ? (n - 0.7f) * 2.2f : 0f;
-                    emissionCol = new Color(0.4f, 0.2f, 0.8f) * swirl;
+                    if (level >= 30)
+                    {
+                        // 특이점: 거의 완전한 어둠 + 푸른 빛 테두리 잔광
+                        baseCol = Color.Lerp(Color.black, new Color(0.05f, 0.04f, 0.1f), n * 0.35f);
+                        float rim = Mathf.Pow(Mathf.Clamp01((n - 0.62f) / 0.38f), 2f);
+                        emissionCol = new Color(0.55f, 0.7f, 1f) * rim * 0.5f;
+                    }
+                    else if (level == 29)
+                    {
+                        // 초대질량 블랙홀: 어둠 속에 휘감기는 보랏빛 광류
+                        float streak = Mathf.Sin((u + n * 0.3f) * Mathf.PI * 8f) * 0.5f + 0.5f;
+                        baseCol = Color.Lerp(Color.black, new Color(0.1f, 0.07f, 0.2f), n * 0.45f);
+                        emissionCol = new Color(0.45f, 0.3f, 0.9f) * Mathf.Pow(streak, 6f) * n * 0.65f;
+                    }
+                    else
+                    {
+                        baseCol = Color.Lerp(Color.black, new Color(0.16f, 0.1f, 0.3f), n * 0.4f);
+                        float swirl = n > 0.68f ? (n - 0.68f) * 2.4f : 0f;
+                        emissionCol = new Color(0.5f, 0.25f, 0.9f) * swirl;
+                    }
+
                     break;
                 }
             }
@@ -281,6 +371,207 @@ namespace StarForge.Presentation
             baseCol.a = 1f;
             emissionCol = ClampColor(emissionCol);
             emissionCol.a = 1f;
+        }
+
+        private static void ShadeStar(
+            int level,
+            float u,
+            float v,
+            Color baseColor,
+            float seed,
+            out Color baseCol,
+            out Color emissionCol)
+        {
+            switch (level)
+            {
+                case 16: // 원시별: 휘감기는 먼지와 갓 점화된 빛
+                {
+                    float n = Fbm(u, v, 3.4f, 4, seed);
+                    float swirlU = u + 0.22f * (n - 0.5f);
+                    float band = Mathf.Sin((v + 0.3f * (n - 0.5f)) * Mathf.PI * 5f + swirlU * Mathf.PI * 2f) * 0.5f + 0.5f;
+                    Color dust = baseColor * 0.45f;
+                    Color hot = Color.Lerp(baseColor, Color.white, 0.4f);
+                    baseCol = Color.Lerp(dust, hot, band * 0.6f + n * 0.4f);
+                    emissionCol = baseCol * (0.4f + 0.5f * band);
+                    break;
+                }
+                case 17: // 적색왜성: 느리게 끓는 깊은 붉은 대류 세포
+                {
+                    float cells = Fbm(u, v, 2.6f, 3, seed);
+                    float grain = Fbm(u, v, 9f, 2, seed + 17f);
+                    Color cool = new Color(0.45f, 0.08f, 0.04f);
+                    Color warm = Color.Lerp(baseColor, new Color(1f, 0.45f, 0.2f), 0.5f);
+                    baseCol = Color.Lerp(cool, warm, cells * 0.75f + grain * 0.25f);
+                    emissionCol = baseCol * (0.45f + 0.45f * cells);
+                    break;
+                }
+                case 18: // 주계열성: 황금빛 쌀알 조직과 흑점
+                {
+                    float g = Fbm(u, v, 8f, 3, seed);
+                    Color coolBody = baseColor * 0.8f;
+                    Color hotBody = Color.Lerp(baseColor, Color.white, 0.7f);
+                    baseCol = Color.Lerp(coolBody, hotBody, g);
+                    float spot = Fbm(u, v, 2.8f, 3, seed + 31f);
+                    if (spot > 0.74f)
+                    {
+                        baseCol *= Mathf.Lerp(1f, 0.35f, Mathf.InverseLerp(0.74f, 0.88f, spot));
+                    }
+
+                    emissionCol = baseCol * (0.6f + 0.5f * g);
+                    break;
+                }
+                case 19: // 청색거성: 매끈하고 차가운 청백색 광휘
+                {
+                    float sheen = Fbm(u, v, 5f, 3, seed);
+                    Color core = Color.Lerp(baseColor, Color.white, 0.55f);
+                    baseCol = Color.Lerp(baseColor * 0.85f, core, 0.5f + 0.5f * sheen);
+                    emissionCol = baseCol * (0.75f + 0.35f * sheen);
+                    break;
+                }
+                case 20: // 적색거성: 거대한 느린 대류 무늬
+                {
+                    float cells = Fbm(u, v, 1.9f, 3, seed);
+                    float detail = Fbm(u, v, 6f, 2, seed + 7f);
+                    Color dark = new Color(0.5f, 0.1f, 0.03f);
+                    Color bright = Color.Lerp(baseColor, new Color(1f, 0.62f, 0.25f), 0.6f);
+                    baseCol = Color.Lerp(dark, bright, cells * 0.8f + detail * 0.2f);
+                    emissionCol = baseCol * (0.5f + 0.5f * cells);
+                    break;
+                }
+                case 21: // 초거성: 황금빛 화염 필라멘트
+                {
+                    float r = Fbm(u, v, 3.4f, 4, seed);
+                    float ridge = 1f - Mathf.Abs(2f * r - 1f);
+                    float flare = Mathf.Pow(Mathf.Clamp01(ridge), 3f);
+                    Color body = Color.Lerp(new Color(0.85f, 0.4f, 0.08f), baseColor, 0.5f);
+                    Color hotFlare = Color.Lerp(baseColor, Color.white, 0.65f);
+                    baseCol = Color.Lerp(body, hotFlare, flare);
+                    emissionCol = baseCol * (0.55f + 0.6f * flare);
+                    break;
+                }
+                case 22: // 백색왜성: 결정처럼 차분하고 순수한 백광
+                {
+                    float grain = Fbm(u, v, 10f, 2, seed);
+                    float lattice = 1f - Mathf.Abs(2f * Fbm(u, v, 5.5f, 2, seed + 23f) - 1f);
+                    baseCol = Color.Lerp(new Color(0.82f, 0.88f, 1f), Color.white, 0.6f + 0.4f * grain);
+                    if (lattice > 0.88f)
+                    {
+                        baseCol = Color.Lerp(baseCol, new Color(0.75f, 0.9f, 1f), 0.4f);
+                    }
+
+                    emissionCol = baseCol * (0.8f + 0.25f * grain);
+                    break;
+                }
+                case 23: // 중성자별: 극도로 매끈한 표면 위 가는 광선 라인
+                case 24: // 펄서: 중성자별 + 극지 핫스팟
+                {
+                    float surface = Fbm(u, v, 6f, 2, seed);
+                    Color body = Color.Lerp(baseColor, Color.white, 0.5f + 0.2f * surface);
+                    float line = Mathf.Abs(Mathf.Sin(v * Mathf.PI * 22f));
+                    float lineGlow = Mathf.Pow(line, 24f) * 0.5f;
+                    baseCol = body;
+                    emissionCol = body * (0.75f + 0.3f * surface) + Color.white * lineGlow * 0.4f;
+
+                    if (level == 24)
+                    {
+                        float polar = Mathf.Abs(v - 0.5f) * 2f;
+                        if (polar > 0.72f)
+                        {
+                            float cap = Mathf.InverseLerp(0.72f, 0.95f, polar);
+                            emissionCol += Color.Lerp(baseColor, Color.white, 0.6f) * cap * 1.1f;
+                            baseCol = Color.Lerp(baseCol, Color.white, cap * 0.5f);
+                        }
+                    }
+
+                    break;
+                }
+                case 25: // 마그네타: 보랏빛 자기장 필라멘트가 표면을 휘감음
+                {
+                    float r = Fbm(u, v, 4.2f, 4, seed);
+                    float ridge = 1f - Mathf.Abs(2f * r - 1f);
+                    float field = Mathf.Pow(Mathf.Clamp01(ridge), 4f);
+                    Color deep = new Color(0.2f, 0.08f, 0.4f);
+                    Color glow = Color.Lerp(baseColor, new Color(0.9f, 0.6f, 1f), 0.5f);
+                    baseCol = Color.Lerp(deep, glow, 0.35f + field * 0.65f);
+                    emissionCol = glow * (0.35f + field * 1.1f);
+                    break;
+                }
+                case 26: // 초신성 잔해: 어둠 속에 퍼지는 분홍·주황 필라멘트 성운
+                {
+                    float f = Fbm(u, v, 3.8f, 4, seed);
+                    float filament = Mathf.Pow(1f - Mathf.Abs(2f * f - 1f), 3.2f);
+                    float patch = Fbm(u, v, 2.2f, 3, seed + 41f);
+                    Color space = new Color(0.05f, 0.03f, 0.09f);
+                    Color pink = Color.Lerp(baseColor, new Color(1f, 0.55f, 0.75f), 0.5f);
+                    Color amber = new Color(1f, 0.65f, 0.3f);
+                    Color fil = Color.Lerp(pink, amber, patch);
+                    baseCol = Color.Lerp(space, fil, filament * 0.9f);
+                    emissionCol = fil * filament * (0.5f + 0.6f * patch);
+                    break;
+                }
+                case 27: // 쿼크별: 일렁이는 보랏빛 초고밀도 광택
+                {
+                    float shimmer = Fbm(u, v, 11f, 3, seed);
+                    float wave = Mathf.Sin((u * 2f + v) * Mathf.PI * 6f + shimmer * 4f) * 0.5f + 0.5f;
+                    Color core = Color.Lerp(baseColor, Color.white, 0.35f + 0.3f * shimmer);
+                    Color deep = baseColor * 0.55f;
+                    baseCol = Color.Lerp(deep, core, 0.4f + 0.6f * wave * shimmer);
+                    emissionCol = baseCol * (0.7f + 0.45f * wave);
+                    break;
+                }
+                default: // 안전망: 기존 일반 별 셰이딩
+                {
+                    float g = Fbm(u, v, 5.5f, 4, seed);
+                    g = Mathf.Clamp01(g * g * 1.5f);
+                    Color cool = baseColor * 0.75f;
+                    Color hot = Color.Lerp(baseColor, Color.white, 0.65f);
+                    baseCol = Color.Lerp(cool, hot, g);
+                    emissionCol = baseCol * (0.55f + 0.6f * g);
+                    break;
+                }
+            }
+        }
+
+        private static void ApplyCraters(
+            ref Color baseCol,
+            float u,
+            float v,
+            float seed,
+            int count,
+            float radiusMin,
+            float radiusMax)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                float cu = Hash(seed + i * 3.7f);
+                float cv = Mathf.Lerp(0.12f, 0.88f, Hash(seed + i * 9.1f + 1.3f));
+                float radius = Mathf.Lerp(radiusMin, radiusMax, Hash(seed + i * 5.3f + 2.6f));
+
+                float du = Mathf.Abs(u - cu);
+                du = Mathf.Min(du, 1f - du);
+                float dv = v - cv;
+                float distance = Mathf.Sqrt(du * du * 4f + dv * dv);
+
+                if (distance < radius)
+                {
+                    // 크레이터 내부: 중심으로 갈수록 어둡게
+                    float t = distance / radius;
+                    float floor = Mathf.SmoothStep(0.55f, 1f, t);
+                    baseCol *= Mathf.Lerp(0.62f, 1f, floor);
+                }
+                else if (distance < radius * 1.18f)
+                {
+                    // 크레이터 림: 살짝 밝게 솟은 테두리
+                    float rim = 1f - Mathf.InverseLerp(radius, radius * 1.18f, distance);
+                    baseCol *= 1f + rim * 0.22f;
+                }
+            }
+        }
+
+        private static float Hash(float n)
+        {
+            float value = Mathf.Sin(n * 127.1f) * 43758.5453f;
+            return value - Mathf.Floor(value);
         }
 
         private static float Fbm(float u, float v, float scale, int octaves, float seed)

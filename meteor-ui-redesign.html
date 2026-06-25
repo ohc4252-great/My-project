@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>운석 강화 UI 리디자인</title>
+<link href="https://fonts.googleapis.com/css2?family=Jua&family=Nunito:wght@700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    /* === 핵심 색 토큰 (여기만 바꿔도 전체 톤 변경 가능) === */
+    --bg-1:#1a1140;            /* 배경 위 (짙은 보라) */
+    --bg-2:#0d0826;            /* 배경 아래 (남보라) */
+    --panel-1:rgba(98,70,200,.28);
+    --panel-2:rgba(40,25,90,.55);
+    --panel-border:rgba(170,140,255,.45);
+    --rim:rgba(220,200,255,.85);   /* 위쪽 하이라이트 라인 */
+    --accent-1:#a855f7;        /* 보라 */
+    --accent-2:#ec4899;        /* 자홍 */
+    --accent-glow:rgba(168,85,247,.65);
+    --text:#f3ecff;
+    --text-dim:#b9a8e8;
+    --gold:#ffd76a;
+    --radius-pill:999px;
+    --radius-lg:26px;
+    --radius-md:18px;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:'Jua','Nunito',system-ui,sans-serif;
+    background:#05030f;
+    display:flex;justify-content:center;
+    padding:24px;min-height:100vh;
+  }
+  .phone{
+    width:420px;border-radius:34px;position:relative;overflow:hidden;
+    background:
+      radial-gradient(120% 80% at 50% -10%, rgba(168,85,247,.35), transparent 60%),
+      radial-gradient(100% 60% at 80% 110%, rgba(236,72,153,.22), transparent 55%),
+      linear-gradient(180deg, var(--bg-1), var(--bg-2));
+    box-shadow:0 30px 80px rgba(0,0,0,.6), inset 0 0 60px rgba(120,80,220,.15);
+    padding:18px 16px 22px;
+    color:var(--text);
+  }
+  /* 반짝이는 별 배경 */
+  .stars{position:absolute;inset:0;pointer-events:none;
+    background-image:
+      radial-gradient(1.5px 1.5px at 20% 18%, #fff8, transparent),
+      radial-gradient(1.5px 1.5px at 70% 25%, #fff6, transparent),
+      radial-gradient(1px 1px at 40% 40%, #fff7, transparent),
+      radial-gradient(1.5px 1.5px at 85% 55%, #fff5, transparent),
+      radial-gradient(1px 1px at 15% 65%, #fff6, transparent),
+      radial-gradient(1.5px 1.5px at 55% 80%, #fff5, transparent);
+  }
+  .row{display:flex;gap:10px;position:relative;z-index:2}
+
+  /* === 글로시 버튼 (레퍼런스 핵심) === */
+  .btn{
+    border:none;cursor:pointer;color:var(--text);
+    font-family:inherit;font-size:15px;
+    border-radius:var(--radius-pill);
+    padding:13px 16px;position:relative;
+    background:linear-gradient(180deg,#7b3fe4,#5a23b0 55%,#43179a);
+    box-shadow:
+      0 6px 16px rgba(60,20,140,.5),
+      inset 0 1.5px 0 rgba(255,255,255,.55),   /* 위쪽 하이라이트 */
+      inset 0 -4px 10px rgba(20,5,60,.5),       /* 아래 음영 */
+      0 0 0 1.5px rgba(180,150,255,.35);        /* 림 라이트 */
+    transition:transform .12s ease, box-shadow .12s ease;
+  }
+  .btn::before{ /* 유리 광택 */
+    content:"";position:absolute;left:8%;right:8%;top:5px;height:42%;
+    border-radius:var(--radius-pill);
+    background:linear-gradient(180deg,rgba(255,255,255,.5),rgba(255,255,255,0));
+    pointer-events:none;
+  }
+  .btn:hover{transform:translateY(-2px) scale(1.02)}
+  .btn:active{transform:translateY(1px) scale(.98)}
+  .btn.active{
+    background:linear-gradient(180deg,#ff8adf,#e34fb6 55%,#b32d8e);
+    box-shadow:0 6px 18px rgba(220,60,160,.55),
+      inset 0 1.5px 0 rgba(255,255,255,.6),
+      inset 0 -4px 10px rgba(80,10,60,.5),
+      0 0 18px rgba(236,72,153,.5);
+  }
+  .btn .sub{display:block;font-size:11px;opacity:.85;margin-top:2px}
+  .nav .btn{flex:1;text-align:center}
+
+  /* === 패널 (글래스) === */
+  .panel{
+    position:relative;z-index:2;
+    background:linear-gradient(180deg,var(--panel-1),var(--panel-2));
+    border-radius:var(--radius-lg);
+    border:1.5px solid var(--panel-border);
+    box-shadow:inset 0 1.5px 0 var(--rim),
+      0 8px 24px rgba(0,0,0,.35);
+    padding:16px;
+  }
+  .title-panel{margin-top:14px;text-align:center}
+  .title-panel h1{font-size:22px;letter-spacing:.5px}
+  .title-panel .meta{font-size:12px;color:var(--text-dim);margin-top:4px}
+  .badge{
+    display:inline-block;margin-top:8px;font-size:12px;
+    padding:5px 14px;border-radius:var(--radius-pill);
+    background:linear-gradient(180deg,#ffe89a,#f5b13c);
+    color:#5a3a00;box-shadow:inset 0 1px 0 #fff8,0 3px 8px rgba(245,177,60,.4);
+  }
+
+  /* === 메테오 === */
+  .stage{position:relative;z-index:2;height:240px;display:flex;
+    align-items:center;justify-content:center;margin:8px 0}
+  .meteor{
+    font-size:130px;line-height:1;filter:drop-shadow(0 0 30px var(--accent-glow));
+    animation:float 4s ease-in-out infinite;
+  }
+  @keyframes float{0%,100%{transform:translateY(-8px)}50%{transform:translateY(8px)}}
+  .glow-ring{position:absolute;width:230px;height:230px;border-radius:50%;
+    background:radial-gradient(circle,var(--accent-glow),transparent 65%);
+    filter:blur(6px)}
+
+  /* === 강화 패널 === */
+  .enhance-title{
+    text-align:center;font-size:18px;margin-bottom:12px;
+    padding:8px;border-radius:var(--radius-md);
+    background:linear-gradient(180deg,rgba(168,85,247,.5),rgba(120,40,200,.4));
+    box-shadow:inset 0 1px 0 var(--rim);
+  }
+  .enhance-body{display:flex;gap:14px;align-items:center}
+  .mat-slot{
+    width:64px;height:64px;border-radius:var(--radius-md);flex-shrink:0;
+    background:radial-gradient(circle at 50% 35%,#ff7a3d,#7a1f0a);
+    display:flex;align-items:center;justify-content:center;font-size:30px;
+    box-shadow:inset 0 2px 4px rgba(255,255,255,.4),0 0 16px rgba(255,120,60,.5);
+  }
+  .stat{font-size:14px;line-height:1.9;color:var(--text)}
+  .stat .k{color:var(--text-dim)}
+  .stat .hi{color:var(--gold)}
+
+  /* CTA 강화 버튼 */
+  .cta{
+    width:100%;margin-top:14px;font-size:18px;padding:15px;
+    background:linear-gradient(180deg,#54e0a8,#1fae7f 55%,#118a63);
+    box-shadow:0 8px 20px rgba(30,180,120,.5),
+      inset 0 1.5px 0 rgba(255,255,255,.6),
+      inset 0 -4px 10px rgba(5,60,40,.5),
+      0 0 22px rgba(60,220,160,.4);
+  }
+  .cta.active{}
+
+  /* === 재료 바 === */
+  .mat-bar{display:flex;gap:8px;margin-top:14px;position:relative;z-index:2}
+  .mat-card{
+    flex:1;border-radius:var(--radius-md);padding:8px 4px;text-align:center;
+    background:linear-gradient(180deg,rgba(110,80,200,.3),rgba(40,25,80,.5));
+    border:1px solid rgba(160,130,240,.3);
+    box-shadow:inset 0 1px 0 rgba(220,200,255,.4);
+  }
+  .mat-card .ico{font-size:24px;filter:drop-shadow(0 0 6px var(--accent-glow))}
+  .mat-card .nm{font-size:9.5px;color:var(--text-dim);margin-top:2px;line-height:1.2}
+  .mat-card .qty{font-size:11px;color:var(--gold);margin-top:1px}
+
+  /* === SHOP === */
+  .shop{margin-top:16px;text-align:center}
+  .shop .btn{
+    width:78%;font-size:20px;padding:15px;display:inline-flex;
+    align-items:center;justify-content:center;gap:10px;
+  }
+</style>
+</head>
+<body>
+  <div class="phone">
+    <div class="stars"></div>
+
+    <!-- 상단 내비 -->
+    <div class="row nav">
+      <button class="btn active">별 채굴하기<span class="sub">오늘 완료</span></button>
+      <button class="btn">재료 교환</button>
+      <button class="btn">도감</button>
+      <button class="btn">설정</button>
+    </div>
+
+    <!-- 타이틀 -->
+    <div class="panel title-panel">
+      <h1>4강 · 거대 하트 운석</h1>
+      <div class="meta">최고 기록 4강</div>
+      <span class="badge">항성 분해</span>
+    </div>
+
+    <!-- 메테오 -->
+    <div class="stage">
+      <div class="glow-ring"></div>
+      <div class="meteor">💖</div>
+    </div>
+
+    <!-- 강화 -->
+    <div class="panel">
+      <div class="enhance-title">강화</div>
+      <div class="enhance-body">
+        <div class="mat-slot">🔥</div>
+        <div class="stat">
+          <div><span class="k">선택 재료</span> · 운석 파편</div>
+          <div><span class="k">성공 확률</span> <span class="hi">50%</span></div>
+          <div><span class="k">실패 시</span> 30% 확률 소멸</div>
+          <div><span class="k">상태</span> 안정</div>
+        </div>
+      </div>
+      <button class="btn cta active">⚡ 강화하기</button>
+    </div>
+
+    <!-- 재료 -->
+    <div class="mat-bar">
+      <div class="mat-card"><div class="ico">🪨</div><div class="nm">운석 파편</div><div class="qty">x999</div></div>
+      <div class="mat-card"><div class="ico">⭐</div><div class="nm">별의 조각</div><div class="qty">x999</div></div>
+      <div class="mat-card"><div class="ico">☄️</div><div class="nm">별똥 조각</div><div class="qty">x999</div></div>
+      <div class="mat-card"><div class="ico">💎</div><div class="nm">특이성 조각</div><div class="qty">x999</div></div>
+      <div class="mat-card"><div class="ico">🌟</div><div class="nm">원초의 별</div><div class="qty">x999</div></div>
+    </div>
+
+    <!-- SHOP -->
+    <div class="shop">
+      <button class="btn">🛒 SHOP 🪐</button>
+    </div>
+  </div>
+</body>
+</html>

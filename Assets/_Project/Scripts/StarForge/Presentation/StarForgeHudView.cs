@@ -12,15 +12,6 @@ namespace StarForge.Presentation
 {
     public sealed class StarForgeHudView : MonoBehaviour
     {
-        private sealed class CollectionCard
-        {
-            public int level;
-            public Button button;
-            public RawImage planetImage;
-            public Text levelText;
-            public Text nameText;
-        }
-
         private readonly StarForgeEnhancementService previewService = new StarForgeEnhancementService();
         private readonly StarForgeMaterialExchangeService exchangeService = new StarForgeMaterialExchangeService();
         public event Action EnhanceClicked;
@@ -28,8 +19,16 @@ namespace StarForge.Presentation
         public event Action<StarForgeCurrencyType> CurrencySelected;
         public event Action<int, int> MaterialExchangeRequested;
         public event Action<bool> SoundToggled;
+        public event Action<float> BgmVolumeChanged;
+        public event Action<float> SfxVolumeChanged;
         public event Action<bool> VibrationToggled;
+        public event Action<bool> EnhancementAnimationSkipToggled;
+        public event Action<Vector2> CameraOrbitDragged;
         public event Action<int> ReviveRequested;
+        public event Action RewardedReviveRequested;
+        public event Action AdvertisingPrivacyOptionsRequested;
+        public event Action DisassembleRequested;
+        public event Action MiningRequested;
 
         private readonly Button[] currencyButtons = new Button[5];
         private readonly Text[] currencyButtonTexts = new Text[5];
@@ -40,8 +39,6 @@ namespace StarForge.Presentation
         private readonly Text[] exchangeRouteStatusTexts = new Text[8];
         private readonly Image[] exchangeSourceIcons = new Image[8];
         private readonly Image[] exchangeTargetIcons = new Image[8];
-        private CollectionCard[] collectionCards;
-
         private Font font;
         private Sprite[] materialIconSprites;
         private Sprite fallbackMaterialIcon;
@@ -57,8 +54,15 @@ namespace StarForge.Presentation
         private GameObject resultPanel;
         private Text resultTitleText;
         private Text resultBodyText;
+        private GameObject resultRewardRow;
+        private readonly Image[] resultRewardIcons = new Image[5];
+        private readonly Text[] resultRewardTexts = new Text[5];
         private GameObject settingsPanel;
         private GameObject resetConfirmPanel;
+        private Button disassembleButton;
+        private GameObject disassembleConfirmPanel;
+        private Text disassembleBodyText;
+        private string pendingDisassembleSummary = string.Empty;
         private GameObject exchangePanel;
         private Text exchangeStatusText;
         private Button exchangeOpenButton;
@@ -71,28 +75,48 @@ namespace StarForge.Presentation
         private Button exchangeQuantityConfirmButton;
         private int pendingExchangeRouteIndex = -1;
         private Button collectionOpenButton;
+        private Button miningOpenButton;
+        private Text miningOpenButtonText;
         private GameObject collectionPanel;
-        private ScrollRect collectionScrollRect;
-        private RectTransform collectionViewportRect;
-        private GridLayoutGroup collectionGrid;
-        private Text collectionProgressText;
-        private GameObject collectionDetailPanel;
-        private Text collectionDetailTitleText;
-        private Text collectionDetailLevelText;
-        private RawImage collectionDetailPlanetImage;
+        private Text collectionTitleText;
+        private RawImage collectionPlanetImage;
+        private Button collectionPreviousButton;
+        private Button collectionNextButton;
+        private Toggle collectionSkipToggle;
+        private Text collectionSkipToggleText;
+        private Toggle enhancementAnimationSkipToggle;
+        private readonly Button[] collectionShapeButtons = new Button[3];
+        private readonly Text[] collectionShapeButtonTexts = new Text[3];
+        private readonly GameObject[] collectionShapeLockIcons = new GameObject[3];
+        private readonly int[] collectionShapeMaxLevels = { 0, -1, -1 };
+        private readonly bool[] collectionShapeDiscovered = { true, false, false };
         private StarForgeCollectionPreview collectionPreview;
-        private Sprite collectionCircleSprite;
+        private int collectionCurrentLevel;
+        private int collectionMaxUnlockedLevel;
+        private StarForgePlanetShape collectionShape = StarForgePlanetShape.Default;
+        private bool collectionSkipEnabled;
+        private bool collectionTransitioning;
         private Toggle soundToggle;
+        private Slider bgmVolumeSlider;
+        private Text bgmVolumeValueText;
+        private Slider sfxVolumeSlider;
+        private Text sfxVolumeValueText;
         private Toggle vibrationToggle;
         private StarForgeBalance balanceRef;
-        private CanvasGroup bottomHudCanvasGroup;
-        private Coroutine bottomHudFadeRoutine;
-        private bool bottomHudVisible = true;
+        private CanvasGroup mainHudCanvasGroup;
+        private Coroutine mainHudFadeRoutine;
+        private bool mainHudVisible = true;
         private GameObject revivePanel;
         private Text reviveBodyText;
         private ReviveRow[] reviveRows;
         private int reviveDestroyedLevel;
+        private Button rewardedReviveButton;
+        private Text rewardedReviveButtonText;
         private bool isBuilt;
+        private Sprite chamferedUiSprite;
+        private RawImage spaceBackdropImage;
+        private Texture2D spaceBackdropTexture;
+        private Texture2D expandedSpaceBackdropTexture;
 
         public bool IsBuilt
         {
@@ -123,7 +147,7 @@ namespace StarForge.Presentation
             gameObject.AddComponent<GraphicRaycaster>();
 
             Image background = gameObject.AddComponent<Image>();
-            background.color = new Color(0.02f, 0.03f, 0.07f, 0.82f);
+            background.color = Color.clear;
 
             RectTransform root = GetComponent<RectTransform>();
             root.anchorMin = Vector2.zero;
@@ -131,14 +155,18 @@ namespace StarForge.Presentation
             root.offsetMin = Vector2.zero;
             root.offsetMax = Vector2.zero;
 
+            CreateSpaceBackdrop(root);
             RectTransform safeAreaRoot = CreateSafeAreaRoot(root);
+            RectTransform mainHudRoot = CreateMainHudRoot(safeAreaRoot);
 
-            BuildTopPanel(safeAreaRoot);
-            BuildSettingsButton(safeAreaRoot);
-            BuildMaterialPanel(safeAreaRoot, balance);
+            BuildPlanetDragSurface(mainHudRoot);
+            BuildTopPanel(mainHudRoot);
+            BuildSettingsButton(mainHudRoot);
+            BuildMaterialPanel(mainHudRoot, balance);
             BuildResultPanel(safeAreaRoot);
             BuildSettingsPanel(safeAreaRoot);
             BuildResetConfirmPanel(safeAreaRoot);
+            BuildDisassembleConfirmPanel(safeAreaRoot);
             BuildExchangePanel(safeAreaRoot);
             BuildCollectionPanel(safeAreaRoot, balance);
             BuildRevivePanel(safeAreaRoot, balance);
@@ -154,15 +182,17 @@ namespace StarForge.Presentation
         {
             StageVisualConfig stage = balance.GetStage(saveData.currentLevel);
             CurrencyConfig selectedConfig = balance.GetCurrency(selectedCurrency);
+            StarForgePlanetShape shape = (StarForgePlanetShape)saveData.planetShape;
+            string stageName = balance.GetStageName(saveData.currentLevel, shape);
 
-            levelText.text = saveData.currentLevel + "강  " + stage.displayName;
+            levelText.text = saveData.currentLevel + "강  " + stageName;
             levelText.color = GetLevelTextColor(saveData.currentLevel);
             if (levelTextOutline != null)
             {
                 levelTextOutline.effectColor = GetLevelOutlineColor(saveData.currentLevel);
             }
 
-            highestText.text = "최고 기록 " + saveData.highestLevel + "강";
+            highestText.text = "획득 기록 " + saveData.highestLevel + "강";
             selectedMaterialText.text = selectedConfig.displayName;
             if (selectedMaterialIconImage != null)
             {
@@ -172,27 +202,61 @@ namespace StarForge.Presentation
 
             if (preview.isMaxLevel)
             {
-                chanceText.text = "성공확률 : MAX";
-                riskText.text = "더 이상 강화할 수 없습니다.";
+                chanceText.text =
+                    "<color=#5EBBFF>성공 확률</color>   <color=#FFD56A>MAX</color>";
+                riskText.text =
+                    "<color=#C7D5EA>더 이상 강화할 수 없습니다.</color>";
             }
             else if (!preview.isAvailable)
             {
-                chanceText.text = "성공확률 : -";
-                riskText.text = "다른 재료를 선택하세요.";
+                chanceText.text =
+                    "<color=#5EBBFF>성공 확률</color>   <color=#FFD56A>-</color>";
+                riskText.text =
+                    "<color=#C7D5EA>다른 재료를 선택하세요.</color>";
             }
             else
             {
-                chanceText.text = "성공확률 : " + StarForgeFormat.Percent(preview.successRatePercent);
-                riskText.text = "실패시 " + StarForgeFormat.Percent(preview.destructionChancePercent) + " 확률로 소멸";
+                chanceText.text =
+                    "<color=#5EBBFF>성공 확률</color>   <color=#FFD56A>" +
+                    StarForgeFormat.Percent(preview.successRatePercent) +
+                    "</color>";
+                riskText.text =
+                    "<color=#C7D5EA>실패 시</color>   <color=#FFBD3E>" +
+                    StarForgeFormat.Percent(preview.destructionChancePercent) +
+                    "</color> <color=#C7D5EA>확률로 소멸</color>";
             }
 
-            statusText.text = saveData.isFractured
-                ? "상태 : 균열"
-                : "상태 : 안정";
+            statusText.text = saveData.fractureCount > 0
+                ? "<color=#C7D5EA>상태</color>   <color=#FF6672>균열 " +
+                  saveData.fractureCount +
+                  "회</color>"
+                : "<color=#C7D5EA>상태</color>   <color=#65D783>안정</color>";
+            statusText.color = Color.white;
 
             bool canEnhance = !isBusy && preview.isAvailable && preview.hasEnoughCurrency && !preview.isMaxLevel;
             enhanceButton.interactable = canEnhance;
-            SetBottomHudVisible(!isBusy);
+            SetSpaceBackdropExpanded(isBusy);
+            SetMainHudVisible(!isBusy);
+
+            if (disassembleButton != null)
+            {
+                CurrencyAmount[] disassembleReward =
+                    previewService.GetDisassembleRewards(saveData, balance);
+                bool canDisassemble = !isBusy &&
+                    saveData.currentLevel > 0 &&
+                    disassembleReward != null &&
+                    disassembleReward.Length > 0;
+                disassembleButton.interactable = canDisassemble;
+                pendingDisassembleSummary = BuildDisassembleSummary(
+                    saveData.currentLevel,
+                    stageName,
+                    disassembleReward);
+            }
+
+            if (miningOpenButton != null)
+            {
+                miningOpenButton.interactable = !isBusy;
+            }
 
             for (int i = 0; i < currencyButtons.Length; i++)
             {
@@ -211,9 +275,16 @@ namespace StarForge.Presentation
                 StarForgeAttemptPreview currencyPreview = previewService.GetPreview(saveData, balance, currencyType);
                 bool isSelected = selectedCurrency == currencyType;
                 button.interactable = !isBusy;
-                button.image.color = isSelected
-                    ? new Color(0.08f, 0.16f, 0.32f, 1f)
-                    : new Color(0.035f, 0.055f, 0.105f, 1f);
+                Color slotColor = isSelected
+                    ? Color.white
+                    : new Color(0.78f, 0.88f, 1f, 0.9f);
+                ColorBlock slotColors = button.colors;
+                slotColors.normalColor = slotColor;
+                slotColors.highlightedColor = Color.white;
+                slotColors.pressedColor = new Color(0.62f, 0.76f, 0.96f, 0.95f);
+                slotColors.selectedColor = Color.white;
+                button.colors = slotColors;
+                button.image.color = slotColor;
 
                 Color contentColor = currencyPreview.isAvailable
                     ? new Color(0.88f, 0.95f, 1f, 1f)
@@ -235,13 +306,62 @@ namespace StarForge.Presentation
                 soundToggle.SetIsOnWithoutNotify(saveData.soundEnabled);
             }
 
+            if (bgmVolumeSlider != null)
+            {
+                bgmVolumeSlider.SetValueWithoutNotify(
+                    Mathf.Clamp01(saveData.bgmVolume));
+                UpdateVolumeValueText(
+                    bgmVolumeValueText,
+                    saveData.bgmVolume);
+            }
+
+            if (sfxVolumeSlider != null)
+            {
+                sfxVolumeSlider.SetValueWithoutNotify(
+                    Mathf.Clamp01(saveData.sfxVolume));
+                UpdateVolumeValueText(
+                    sfxVolumeValueText,
+                    saveData.sfxVolume);
+            }
+
             if (vibrationToggle != null)
             {
                 vibrationToggle.SetIsOnWithoutNotify(saveData.vibrationEnabled);
             }
 
+            if (enhancementAnimationSkipToggle != null)
+            {
+                enhancementAnimationSkipToggle.SetIsOnWithoutNotify(
+                    saveData.enhancementAnimationSkipEnabled);
+            }
+
             RefreshExchangePanel(saveData, isBusy);
             RefreshCollectionPanel(saveData, balance, isBusy);
+        }
+
+        public void SetMiningAttemptsRemaining(
+            int remaining,
+            int remainingAdBonuses,
+            bool isBusy)
+        {
+            if (miningOpenButton == null)
+            {
+                return;
+            }
+
+            int clampedRemaining = Mathf.Max(0, remaining);
+            bool canWatchAd = remainingAdBonuses > 0;
+            miningOpenButton.interactable =
+                !isBusy &&
+                (clampedRemaining > 0 || canWatchAd);
+            if (miningOpenButtonText != null)
+            {
+                miningOpenButtonText.text = clampedRemaining > 0
+                    ? "별 채굴하기\n오늘 " + clampedRemaining + "회"
+                    : canWatchAd
+                        ? "별 채굴하기\n광고 추가 탐험"
+                        : "별 채굴하기\n오늘 완료";
+            }
         }
 
         private void OnDestroy()
@@ -251,15 +371,16 @@ namespace StarForge.Presentation
                 Destroy(collectionPreview.gameObject);
             }
 
-            if (collectionCircleSprite != null)
+            if (spaceBackdropTexture != null)
             {
-                Texture texture = collectionCircleSprite.texture;
-                Destroy(collectionCircleSprite);
-                if (texture != null)
-                {
-                    Destroy(texture);
-                }
+                Destroy(spaceBackdropTexture);
             }
+
+            if (expandedSpaceBackdropTexture != null)
+            {
+                Destroy(expandedSpaceBackdropTexture);
+            }
+
         }
 
         public void ShowResult(StarForgeEnhancementResult result)
@@ -270,8 +391,25 @@ namespace StarForge.Presentation
             }
 
             resultPanel.SetActive(true);
+            SetResultRewards(null);
             resultTitleText.text = GetResultTitle(result.kind);
             resultBodyText.text = BuildResultBody(result);
+        }
+
+        public void ShowDisassembleResult(
+            CurrencyAmount[] rewards,
+            string newStageName)
+        {
+            if (resultPanel == null)
+            {
+                return;
+            }
+
+            resultPanel.SetActive(true);
+            resultTitleText.text = "행성 분해 완료";
+            resultBodyText.text =
+                "획득 재화\n\n새 행성 : " + newStageName;
+            SetResultRewards(rewards);
         }
 
         public void ShowExchangeResult(StarForgeMaterialExchangeResult result)
@@ -306,217 +444,565 @@ namespace StarForge.Presentation
 
         private void BuildTopPanel(RectTransform root)
         {
-            GameObject panel = CreatePanel("Top HUD", root, new Color(0.045f, 0.065f, 0.11f, 0.92f));
+            GameObject panel = CreatePanel(
+                "Top HUD",
+                root,
+                new Color(0.008f, 0.024f, 0.055f, 0.96f));
             RectTransform rect = panel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.08f, 0.8f);
-            rect.anchorMax = new Vector2(0.92f, 0.905f);
+            rect.anchorMin = new Vector2(0.055f, 0.75f);
+            rect.anchorMax = new Vector2(0.945f, 0.875f);
             rect.pivot = new Vector2(0.5f, 0.5f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                panel,
+                new Color(0.008f, 0.026f, 0.062f, 0.97f),
+                new Color(0.05f, 0.54f, 0.92f, 0.96f),
+                2f);
 
             VerticalLayoutGroup layout = panel.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(16, 16, 16, 14);
-            layout.spacing = 6f;
+            layout.padding = new RectOffset(38, 38, 18, 8);
+            layout.spacing = 5f;
+            layout.childControlWidth = true;
             layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
             layout.childAlignment = TextAnchor.MiddleCenter;
 
-            levelText = CreateText("0강 우주 먼지", 28, FontStyle.Bold, TextAnchor.MiddleCenter, panel.transform);
+            levelText = CreateText(
+                "0강 우주 먼지",
+                42,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                panel.transform);
             levelTextOutline = levelText.gameObject.AddComponent<Outline>();
             levelTextOutline.effectColor = GetLevelOutlineColor(0);
-            levelTextOutline.effectDistance = new Vector2(2f, -2f);
-            highestText = CreateText("최고 기록 0강", 17, FontStyle.Normal, TextAnchor.MiddleCenter, panel.transform);
-            SetPreferredHeight(levelText, 50f);
-            SetPreferredHeight(highestText, 28f);
+            levelTextOutline.effectDistance = new Vector2(1.5f, -1.5f);
+            highestText = CreateText(
+                "획득 기록 0강",
+                18,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                panel.transform);
+            highestText.color = new Color(0.58f, 0.74f, 0.98f, 1f);
+            SetPreferredHeight(levelText, 52f);
+            SetPreferredHeight(highestText, 30f);
             levelText.resizeTextForBestFit = true;
-            levelText.resizeTextMinSize = 22;
-            levelText.resizeTextMaxSize = 34;
+            levelText.resizeTextMinSize = 30;
+            levelText.resizeTextMaxSize = 42;
+
+            disassembleButton = CreateButton("분해", 15, panel.transform);
+            RectTransform disassembleRect =
+                disassembleButton.GetComponent<RectTransform>();
+            disassembleRect.anchorMin = new Vector2(0.78f, 0.08f);
+            disassembleRect.anchorMax = new Vector2(0.97f, 0.36f);
+            disassembleRect.offsetMin = Vector2.zero;
+            disassembleRect.offsetMax = Vector2.zero;
+            LayoutElement disassembleLayout = disassembleButton.GetComponent<LayoutElement>();
+            disassembleLayout.ignoreLayout = true;
+            disassembleLayout.minWidth = 0f;
+            disassembleLayout.preferredWidth = 0f;
+            disassembleLayout.flexibleWidth = 0f;
+            disassembleLayout.minHeight = 0f;
+            disassembleLayout.preferredHeight = 0f;
+            ApplyCanvasButtonStyle(
+                disassembleButton,
+                new Color(0.008f, 0.027f, 0.06f, 1f),
+                new Color(0.08f, 0.58f, 1f, 1f),
+                new Color(1f, 0.78f, 0.25f, 1f));
+            Text disassembleLabel =
+                disassembleButton.GetComponentInChildren<Text>();
+            if (disassembleLabel != null)
+            {
+                disassembleLabel.resizeTextMinSize = 10;
+                disassembleLabel.resizeTextMaxSize = 15;
+            }
+
+            disassembleButton.onClick.AddListener(OpenDisassembleConfirm);
+        }
+
+        private void BuildDisassembleConfirmPanel(RectTransform root)
+        {
+            disassembleConfirmPanel = CreatePanel(
+                "Disassemble Confirm Popup",
+                root,
+                new Color(0.008f, 0.025f, 0.055f, 0.99f));
+            RectTransform rect = disassembleConfirmPanel.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.08f, 0.3f);
+            rect.anchorMax = new Vector2(0.92f, 0.7f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                disassembleConfirmPanel,
+                new Color(0.008f, 0.025f, 0.055f, 0.995f),
+                new Color(0.08f, 0.52f, 0.86f, 0.98f),
+                2f);
+
+            VerticalLayoutGroup layout = disassembleConfirmPanel.AddComponent<VerticalLayoutGroup>();
+            layout.padding = new RectOffset(30, 30, 28, 24);
+            layout.spacing = 14f;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
+            layout.childAlignment = TextAnchor.MiddleCenter;
+
+            Text title = CreateText("행성 분해", 38, FontStyle.Bold, TextAnchor.MiddleCenter, disassembleConfirmPanel.transform);
+            title.color = new Color(0.94f, 0.97f, 1f, 1f);
+            SetPreferredHeight(title, 54f);
+            disassembleBodyText = CreateText(
+                string.Empty,
+                22,
+                FontStyle.Normal,
+                TextAnchor.MiddleCenter,
+                disassembleConfirmPanel.transform);
+            disassembleBodyText.color = new Color(0.78f, 0.86f, 0.96f, 1f);
+            disassembleBodyText.resizeTextForBestFit = true;
+            disassembleBodyText.resizeTextMinSize = 16;
+            disassembleBodyText.resizeTextMaxSize = 22;
+            SetPreferredHeight(disassembleBodyText, 240f);
+
+            GameObject row = new GameObject("Disassemble Confirm Buttons", typeof(RectTransform));
+            row.transform.SetParent(disassembleConfirmPanel.transform, false);
+            HorizontalLayoutGroup rowLayout = row.AddComponent<HorizontalLayoutGroup>();
+            rowLayout.spacing = 14f;
+            rowLayout.childControlWidth = true;
+            rowLayout.childControlHeight = true;
+            rowLayout.childForceExpandWidth = true;
+            rowLayout.childForceExpandHeight = true;
+            LayoutElement rowElement = row.AddComponent<LayoutElement>();
+            rowElement.minHeight = 15f;
+            rowElement.preferredHeight = 15f;
+
+            Button confirmButton = CreateButton("분해", 26, row.transform);
+            ShrinkButtonHeight(confirmButton, 15f);
+            ApplyCanvasButtonStyle(
+                confirmButton,
+                new Color(0.24f, 0.035f, 0.035f, 1f),
+                new Color(0.82f, 0.16f, 0.16f, 1f),
+                new Color(1f, 0.75f, 0.7f, 1f));
+            confirmButton.onClick.AddListener(() =>
+            {
+                disassembleConfirmPanel.SetActive(false);
+                DisassembleRequested?.Invoke();
+            });
+
+            Button cancelButton = CreateButton("취소", 26, row.transform);
+            ShrinkButtonHeight(cancelButton, 15f);
+            ApplyCanvasButtonStyle(
+                cancelButton,
+                new Color(0.018f, 0.055f, 0.12f, 1f),
+                new Color(0.16f, 0.32f, 0.5f, 1f),
+                new Color(0.82f, 0.9f, 1f, 1f));
+            cancelButton.onClick.AddListener(() => disassembleConfirmPanel.SetActive(false));
+
+            disassembleConfirmPanel.SetActive(false);
+        }
+
+        private static void ShrinkButtonHeight(Button button, float height)
+        {
+            LayoutElement element = button.GetComponent<LayoutElement>();
+            if (element != null)
+            {
+                element.minHeight = height;
+                element.preferredHeight = height;
+            }
+
+            Text label = button.GetComponentInChildren<Text>();
+            if (label != null)
+            {
+                RectTransform labelRect = label.rectTransform;
+                labelRect.offsetMin = new Vector2(8f, 1f);
+                labelRect.offsetMax = new Vector2(-8f, -1f);
+            }
+        }
+
+        private static string BuildDisassembleSummary(int level, string stageName, CurrencyAmount[] rewards)
+        {
+            System.Text.StringBuilder builder = new System.Text.StringBuilder();
+            builder.Append(level);
+            builder.Append("강 ");
+            builder.Append(stageName);
+            builder.Append("을(를) 분해합니다.\n\n획득 재화");
+
+            if (rewards != null)
+            {
+                for (int i = 0; i < rewards.Length; i++)
+                {
+                    if (rewards[i] == null)
+                    {
+                        continue;
+                    }
+
+                    builder.Append('\n');
+                    builder.Append(StarForgeCurrencyNames.GetDisplayName(rewards[i].type));
+                    builder.Append(" +");
+                    builder.Append(StarForgeFormat.Number(rewards[i].amount));
+                }
+            }
+
+            builder.Append("\n\n분해 후 0강 새 행성으로 시작합니다. (모양 재추첨)");
+            return builder.ToString();
+        }
+
+        private void OpenDisassembleConfirm()
+        {
+            if (disassembleConfirmPanel == null)
+            {
+                return;
+            }
+
+            disassembleBodyText.text = pendingDisassembleSummary;
+            disassembleConfirmPanel.SetActive(true);
+        }
+
+        private void BuildPlanetDragSurface(RectTransform root)
+        {
+            GameObject dragObject = new GameObject(
+                "Planet Drag Surface",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(StarForgeDragRotationInput));
+            dragObject.transform.SetParent(root, false);
+            RectTransform rect = dragObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.06f, 0.4f);
+            rect.anchorMax = new Vector2(0.94f, 0.875f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+
+            Image image = dragObject.GetComponent<Image>();
+            image.color = Color.clear;
+            image.raycastTarget = true;
+
+            StarForgeDragRotationInput dragInput =
+                dragObject.GetComponent<StarForgeDragRotationInput>();
+            dragInput.Dragged += delta => CameraOrbitDragged?.Invoke(delta);
+        }
+
+        private void BuildEnhancementAnimationSkipToggle(Transform parent)
+        {
+            GameObject toggleObject = new GameObject(
+                "Enhancement Animation Skip Toggle",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(Toggle));
+            toggleObject.transform.SetParent(parent, false);
+            RectTransform rect = toggleObject.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.805f, 0.155f);
+            rect.anchorMax = new Vector2(0.947f, 0.235f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+
+            Image target = ApplyCanvasFrame(
+                toggleObject,
+                new Color(0.018f, 0.055f, 0.12f, 0.99f),
+                new Color(0.12f, 0.58f, 0.92f, 0.98f),
+                2f);
+            Text label = CreateText(
+                "스킵",
+                17,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                toggleObject.transform);
+            RectTransform labelRect = label.GetComponent<RectTransform>();
+            labelRect.anchorMin = new Vector2(0.08f, 0.56f);
+            labelRect.anchorMax = new Vector2(0.92f, 0.94f);
+            labelRect.offsetMin = Vector2.zero;
+            labelRect.offsetMax = Vector2.zero;
+            label.color = new Color(0.82f, 0.92f, 1f, 1f);
+            label.resizeTextForBestFit = true;
+            label.resizeTextMinSize = 12;
+            label.resizeTextMaxSize = 17;
+
+            GameObject checkboxObject = new GameObject(
+                "Checkbox",
+                typeof(RectTransform),
+                typeof(Image));
+            checkboxObject.transform.SetParent(toggleObject.transform, false);
+            RectTransform checkboxRect =
+                checkboxObject.GetComponent<RectTransform>();
+            checkboxRect.anchorMin = new Vector2(0.5f, 0.08f);
+            checkboxRect.anchorMax = new Vector2(0.5f, 0.08f);
+            checkboxRect.pivot = new Vector2(0.5f, 0f);
+            checkboxRect.sizeDelta = new Vector2(34f, 34f);
+            checkboxRect.anchoredPosition = Vector2.zero;
+            Image checkbox = checkboxObject.GetComponent<Image>();
+            checkbox.sprite = null;
+            checkbox.type = Image.Type.Simple;
+            checkbox.color = new Color(0.008f, 0.025f, 0.055f, 0.96f);
+            checkbox.raycastTarget = false;
+            AddFourSideBorder(
+                checkboxObject,
+                new Color(0.38f, 0.94f, 1f, 1f),
+                2f);
+
+            Text checkmark = CreateText(
+                "V",
+                22,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                checkboxObject.transform);
+            StretchRect(checkmark.rectTransform, Vector2.zero);
+            checkmark.color = new Color(0.38f, 0.94f, 1f, 1f);
+            checkmark.raycastTarget = false;
+
+            enhancementAnimationSkipToggle =
+                toggleObject.GetComponent<Toggle>();
+            enhancementAnimationSkipToggle.targetGraphic = target;
+            enhancementAnimationSkipToggle.graphic = checkmark;
+            enhancementAnimationSkipToggle.SetIsOnWithoutNotify(false);
+            enhancementAnimationSkipToggle.onValueChanged.AddListener(
+                value => EnhancementAnimationSkipToggled?.Invoke(value));
         }
 
         private void BuildSettingsButton(RectTransform root)
         {
-            exchangeOpenButton = CreateButton("재료 교환", 16, root);
-            RectTransform exchangeRect = exchangeOpenButton.GetComponent<RectTransform>();
-            exchangeRect.anchorMin = new Vector2(0.55f, 0.93f);
-            exchangeRect.anchorMax = new Vector2(0.73f, 0.985f);
-            exchangeRect.offsetMin = new Vector2(0f, -30f);
-            exchangeRect.offsetMax = new Vector2(0f, -30f);
+            miningOpenButton = CreateButton("별 채굴하기\n오늘 3회", 20, root);
+            miningOpenButtonText = miningOpenButton.GetComponentInChildren<Text>();
+            RectTransform miningRect = miningOpenButton.GetComponent<RectTransform>();
+            miningRect.anchorMin = new Vector2(0.03f, 0.895f);
+            miningRect.anchorMax = new Vector2(0.335f, 0.965f);
+            miningRect.offsetMin = Vector2.zero;
+            miningRect.offsetMax = Vector2.zero;
+            ApplyCanvasButtonStyle(
+                miningOpenButton,
+                new Color(0.03f, 0.13f, 0.28f, 0.99f),
+                new Color(0.08f, 0.62f, 1f, 1f),
+                new Color(0.4f, 0.8f, 1f, 1f));
+            if (miningOpenButtonText != null)
+            {
+                miningOpenButtonText.lineSpacing = 0.82f;
+            }
+            miningOpenButton.onClick.AddListener(() => MiningRequested?.Invoke());
 
-            exchangeOpenButton.image.color = new Color(0.075f, 0.045f, 0.13f, 0.96f);
-            ColorBlock exchangeColors = exchangeOpenButton.colors;
-            exchangeColors.normalColor = new Color(0.075f, 0.045f, 0.13f, 0.96f);
-            exchangeColors.highlightedColor = new Color(0.16f, 0.08f, 0.25f, 1f);
-            exchangeColors.pressedColor = new Color(0.045f, 0.025f, 0.08f, 1f);
-            exchangeOpenButton.colors = exchangeColors;
-            SetButtonTextColor(exchangeOpenButton, new Color(0.94f, 0.9f, 1f, 1f));
-            AddPanelOutline(
-                exchangeOpenButton.gameObject,
-                new Color(0.34f, 0.16f, 0.48f, 0.9f),
-                new Vector2(1.5f, -1.5f));
+            exchangeOpenButton = CreateButton("재료 교환", 20, root);
+            RectTransform exchangeRect = exchangeOpenButton.GetComponent<RectTransform>();
+            exchangeRect.anchorMin = new Vector2(0.35f, 0.895f);
+            exchangeRect.anchorMax = new Vector2(0.565f, 0.965f);
+            exchangeRect.offsetMin = Vector2.zero;
+            exchangeRect.offsetMax = Vector2.zero;
+            ApplyCanvasButtonStyle(
+                exchangeOpenButton,
+                new Color(0.018f, 0.055f, 0.12f, 0.99f),
+                new Color(0.24f, 0.3f, 0.38f, 1f),
+                new Color(0.78f, 0.86f, 0.98f, 1f));
             exchangeOpenButton.onClick.AddListener(OpenExchangePanel);
 
-            collectionOpenButton = CreateButton("도감", 16, root);
+            collectionOpenButton = CreateButton("도감", 20, root);
             RectTransform collectionRect = collectionOpenButton.GetComponent<RectTransform>();
-            collectionRect.anchorMin = new Vector2(0.74f, 0.93f);
-            collectionRect.anchorMax = new Vector2(0.85f, 0.985f);
-            collectionRect.offsetMin = new Vector2(0f, -30f);
-            collectionRect.offsetMax = new Vector2(0f, -30f);
-
-            collectionOpenButton.image.color = new Color(0.045f, 0.1f, 0.12f, 0.96f);
-            ColorBlock collectionColors = collectionOpenButton.colors;
-            collectionColors.normalColor = new Color(0.045f, 0.1f, 0.12f, 0.96f);
-            collectionColors.highlightedColor = new Color(0.08f, 0.2f, 0.23f, 1f);
-            collectionColors.pressedColor = new Color(0.025f, 0.06f, 0.075f, 1f);
-            collectionOpenButton.colors = collectionColors;
-            SetButtonTextColor(collectionOpenButton, new Color(0.78f, 0.96f, 1f, 1f));
-            AddPanelOutline(
-                collectionOpenButton.gameObject,
-                new Color(0.12f, 0.38f, 0.42f, 0.9f),
-                new Vector2(1.5f, -1.5f));
+            collectionRect.anchorMin = new Vector2(0.58f, 0.895f);
+            collectionRect.anchorMax = new Vector2(0.765f, 0.965f);
+            collectionRect.offsetMin = Vector2.zero;
+            collectionRect.offsetMax = Vector2.zero;
+            ApplyCanvasButtonStyle(
+                collectionOpenButton,
+                new Color(0.018f, 0.055f, 0.12f, 0.99f),
+                new Color(0.24f, 0.3f, 0.38f, 1f),
+                new Color(0.78f, 0.86f, 0.98f, 1f));
             collectionOpenButton.onClick.AddListener(OpenCollectionPanel);
 
-            Button settingsButton = CreateButton("설정", 16, root);
+            Button settingsButton = CreateButton("설정", 20, root);
             RectTransform rect = settingsButton.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.86f, 0.93f);
-            rect.anchorMax = new Vector2(0.98f, 0.985f);
-            rect.offsetMin = new Vector2(0f, -30f);
-            rect.offsetMax = new Vector2(0f, -30f);
-
-            settingsButton.image.color = new Color(0.035f, 0.055f, 0.105f, 0.96f);
-            ColorBlock colors = settingsButton.colors;
-            colors.normalColor = new Color(0.035f, 0.055f, 0.105f, 0.96f);
-            colors.highlightedColor = new Color(0.08f, 0.16f, 0.32f, 1f);
-            colors.pressedColor = new Color(0.02f, 0.035f, 0.07f, 1f);
-            settingsButton.colors = colors;
-            SetButtonTextColor(settingsButton, new Color(0.86f, 0.94f, 1f, 1f));
-            AddPanelOutline(settingsButton.gameObject, new Color(0.12f, 0.28f, 0.46f, 0.85f), new Vector2(1.5f, -1.5f));
+            rect.anchorMin = new Vector2(0.78f, 0.895f);
+            rect.anchorMax = new Vector2(0.97f, 0.965f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            ApplyCanvasButtonStyle(
+                settingsButton,
+                new Color(0.018f, 0.055f, 0.12f, 0.99f),
+                new Color(0.24f, 0.3f, 0.38f, 1f),
+                new Color(0.78f, 0.86f, 0.98f, 1f));
             settingsButton.onClick.AddListener(() => settingsPanel.SetActive(true));
         }
 
         private void BuildMaterialPanel(RectTransform root, StarForgeBalance balance)
         {
             GameObject panel = CreatePanel("Bottom HUD", root, new Color(1f, 1f, 1f, 0f));
-            bottomHudCanvasGroup = panel.AddComponent<CanvasGroup>();
             RectTransform rect = panel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.04f, 0f);
-            rect.anchorMax = new Vector2(0.96f, 0f);
-            rect.pivot = new Vector2(0.5f, 0f);
-            rect.anchoredPosition = new Vector2(0f, 90f);
-            rect.sizeDelta = new Vector2(0f, 394f);
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            panel.GetComponent<Image>().raycastTarget = false;
 
-            VerticalLayoutGroup layout = panel.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(0, 0, 4, 4);
-            layout.spacing = 4f;
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
-            layout.childForceExpandWidth = true;
-            layout.childForceExpandHeight = false;
-            layout.childAlignment = TextAnchor.LowerCenter;
-
-            GameObject enhanceButtonBorder = CreatePanel(
-                "Enhance Button Border",
+            GameObject infoPanel = CreatePanel(
+                "Enhance Info",
                 panel.transform,
-                new Color(0.16f, 0.035f, 0.24f, 1f));
-            LayoutElement enhanceBorderLayout = enhanceButtonBorder.AddComponent<LayoutElement>();
-            enhanceBorderLayout.minHeight = 70f;
-            enhanceBorderLayout.preferredHeight = 70f;
-
-            enhanceButton = CreateButton("강화", 28, enhanceButtonBorder.transform);
-            RectTransform enhanceButtonRect = enhanceButton.GetComponent<RectTransform>();
-            enhanceButtonRect.anchorMin = Vector2.zero;
-            enhanceButtonRect.anchorMax = Vector2.one;
-            enhanceButtonRect.offsetMin = new Vector2(3f, 3f);
-            enhanceButtonRect.offsetMax = new Vector2(-3f, -3f);
-            enhanceButton.image.color = new Color(0.08f, 0.24f, 0.5f, 1f);
-            ColorBlock enhanceColors = enhanceButton.colors;
-            enhanceColors.normalColor = new Color(0.08f, 0.24f, 0.5f, 1f);
-            enhanceColors.highlightedColor = new Color(0.12f, 0.34f, 0.68f, 1f);
-            enhanceColors.pressedColor = new Color(0.04f, 0.16f, 0.34f, 1f);
-            enhanceColors.disabledColor = new Color(0.05f, 0.07f, 0.1f, 0.78f);
-            enhanceButton.colors = enhanceColors;
-            SetButtonTextColor(enhanceButton, new Color(0.92f, 0.98f, 1f, 1f));
-            enhanceButton.onClick.AddListener(() => EnhanceClicked?.Invoke());
-
-            GameObject infoPanel = CreatePanel("Enhance Info", panel.transform, new Color(0.035f, 0.04f, 0.075f, 0.98f));
-            RectTransform infoRect = infoPanel.GetComponent<RectTransform>();
-            infoRect.sizeDelta = new Vector2(520f, 198f);
-            LayoutElement infoLayoutElement = infoPanel.AddComponent<LayoutElement>();
-            infoLayoutElement.minHeight = 198f;
-            infoLayoutElement.preferredHeight = 198f;
-            AddPanelOutline(infoPanel, new Color(0.14f, 0.3f, 0.5f, 0.9f), new Vector2(2f, -2f));
+                new Color(0.008f, 0.028f, 0.064f, 0.99f));
+            SetRectAnchors(infoPanel, 0.055f, 0.245f, 0.945f, 0.39f);
+            ApplyCanvasFrame(
+                infoPanel,
+                new Color(0.008f, 0.03f, 0.068f, 0.99f),
+                new Color(0.05f, 0.48f, 0.82f, 0.96f),
+                2f);
 
             HorizontalLayoutGroup infoLayout = infoPanel.AddComponent<HorizontalLayoutGroup>();
-            infoLayout.padding = new RectOffset(8, 8, 2, 2);
-            infoLayout.spacing = 10f;
+            infoLayout.padding = new RectOffset(40, 34, 10, 10);
+            infoLayout.spacing = 28f;
             infoLayout.childAlignment = TextAnchor.MiddleCenter;
             infoLayout.childControlWidth = true;
             infoLayout.childControlHeight = true;
             infoLayout.childForceExpandWidth = true;
             infoLayout.childForceExpandHeight = true;
 
-            GameObject selectedColumn = new GameObject("Selected Material Column", typeof(RectTransform), typeof(LayoutElement));
+            GameObject selectedColumn = new GameObject(
+                "Selected Material Column",
+                typeof(RectTransform),
+                typeof(LayoutElement));
             selectedColumn.transform.SetParent(infoPanel.transform, false);
             LayoutElement selectedColumnLayout = selectedColumn.GetComponent<LayoutElement>();
-            selectedColumnLayout.flexibleWidth = 0.78f;
-            selectedColumnLayout.preferredWidth = 200f;
+            selectedColumnLayout.flexibleWidth = 0.9f;
+            selectedColumnLayout.preferredWidth = 210f;
             VerticalLayoutGroup selectedLayout = selectedColumn.AddComponent<VerticalLayoutGroup>();
-            selectedLayout.padding = new RectOffset(0, 0, 0, 0);
-            selectedLayout.spacing = 1f;
+            selectedLayout.spacing = 2f;
             selectedLayout.childAlignment = TextAnchor.MiddleCenter;
+            selectedLayout.childControlWidth = true;
             selectedLayout.childControlHeight = true;
+            selectedLayout.childForceExpandWidth = true;
             selectedLayout.childForceExpandHeight = false;
 
-            Text selectedTitleText = CreateText("선택 재료", 24, FontStyle.Bold, TextAnchor.MiddleCenter, selectedColumn.transform);
-            selectedTitleText.color = new Color(0.9f, 0.96f, 1f, 1f);
-            SetPreferredHeight(selectedTitleText, 30f);
+            Text selectedTitleText = CreateText(
+                "선택 재료",
+                21,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                selectedColumn.transform);
+            selectedTitleText.color = new Color(0.25f, 0.72f, 1f, 1f);
+            SetPreferredHeight(selectedTitleText, 24f);
 
-            selectedMaterialText = CreateText("운석 파편", 26, FontStyle.Bold, TextAnchor.MiddleCenter, selectedColumn.transform);
-            selectedMaterialText.color = new Color(0.9f, 0.96f, 1f, 1f);
+            selectedMaterialText = CreateText(
+                "운석 파편",
+                24,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                selectedColumn.transform);
+            selectedMaterialText.color = new Color(0.94f, 0.97f, 1f, 1f);
             selectedMaterialText.resizeTextForBestFit = true;
-            selectedMaterialText.resizeTextMinSize = 18;
-            selectedMaterialText.resizeTextMaxSize = 26;
-            SetPreferredHeight(selectedMaterialText, 34f);
+            selectedMaterialText.resizeTextMinSize = 17;
+            selectedMaterialText.resizeTextMaxSize = 24;
+            SetPreferredHeight(selectedMaterialText, 28f);
 
-            GameObject selectedIconObject = new GameObject("Selected Material Icon", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
+            GameObject selectedIconObject = new GameObject(
+                "Selected Material Icon",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(LayoutElement));
             selectedIconObject.transform.SetParent(selectedColumn.transform, false);
-            LayoutElement selectedIconLayout = selectedIconObject.GetComponent<LayoutElement>();
-            selectedIconLayout.preferredWidth = 127.5f;
-            selectedIconLayout.preferredHeight = 127.5f;
+            SetFixedLayoutSize(selectedIconObject, 92f, 92f);
             selectedMaterialIconImage = selectedIconObject.GetComponent<Image>();
             selectedMaterialIconImage.sprite = GetMaterialIcon(0);
             selectedMaterialIconImage.preserveAspect = true;
 
-            GameObject chanceColumn = new GameObject("Chance Column", typeof(RectTransform), typeof(LayoutElement));
+            GameObject chanceColumn = new GameObject(
+                "Chance Column",
+                typeof(RectTransform),
+                typeof(LayoutElement));
             chanceColumn.transform.SetParent(infoPanel.transform, false);
             LayoutElement chanceColumnLayout = chanceColumn.GetComponent<LayoutElement>();
-            chanceColumnLayout.flexibleWidth = 1.22f;
-            chanceColumnLayout.preferredWidth = 290f;
+            chanceColumnLayout.flexibleWidth = 1.35f;
+            chanceColumnLayout.preferredWidth = 320f;
+            AddVerticalDivider(
+                infoPanel.transform,
+                0.42f,
+                new Color(0.08f, 0.42f, 0.72f, 0.62f));
             VerticalLayoutGroup chanceLayout = chanceColumn.AddComponent<VerticalLayoutGroup>();
-            chanceLayout.padding = new RectOffset(0, 0, 0, 0);
-            chanceLayout.spacing = 24f;
+            chanceLayout.padding = new RectOffset(0, 0, 2, 2);
+            chanceLayout.spacing = 8f;
             chanceLayout.childAlignment = TextAnchor.MiddleLeft;
+            chanceLayout.childControlWidth = true;
             chanceLayout.childControlHeight = true;
+            chanceLayout.childForceExpandWidth = true;
             chanceLayout.childForceExpandHeight = false;
 
-            chanceText = CreateText("성공확률 : 100%", 26, FontStyle.Bold, TextAnchor.MiddleLeft, chanceColumn.transform);
-            riskText = CreateText("실패시 30% 확률로 소멸", 24, FontStyle.Bold, TextAnchor.MiddleLeft, chanceColumn.transform);
-            statusText = CreateText("상태 : 안정", 24, FontStyle.Bold, TextAnchor.MiddleLeft, chanceColumn.transform);
-            SetPreferredHeight(chanceText, 39f);
-            SetPreferredHeight(riskText, 36f);
-            SetPreferredHeight(statusText, 36f);
+            chanceText = CreateText(
+                "성공 확률   100%",
+                28,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                chanceColumn.transform);
+            riskText = CreateText(
+                "실패 시   0% 확률로 소멸",
+                22,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                chanceColumn.transform);
+            statusText = CreateText(
+                "상태   안정",
+                22,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                chanceColumn.transform);
+            chanceText.supportRichText = true;
+            riskText.supportRichText = true;
+            statusText.supportRichText = true;
+            chanceText.color = new Color(1f, 0.83f, 0.42f, 1f);
+            riskText.color = new Color(0.88f, 0.93f, 1f, 1f);
+            statusText.color = new Color(0.3f, 0.88f, 0.58f, 1f);
+            SetPreferredHeight(chanceText, 36f);
+            SetPreferredHeight(riskText, 32f);
+            SetPreferredHeight(statusText, 32f);
 
-            GameObject materialRow = CreatePanel("Material Slots", panel.transform, new Color(0.025f, 0.04f, 0.085f, 0.98f));
-            AddFourSideBorder(materialRow, new Color(0.12f, 0.28f, 0.46f, 0.95f), 2f);
+            enhanceButton = CreateButton("강화", 40, panel.transform);
+            RectTransform enhanceButtonRect = enhanceButton.GetComponent<RectTransform>();
+            enhanceButtonRect.anchorMin = new Vector2(0.14f, 0.155f);
+            enhanceButtonRect.anchorMax = new Vector2(0.775f, 0.235f);
+            enhanceButtonRect.offsetMin = Vector2.zero;
+            enhanceButtonRect.offsetMax = Vector2.zero;
+            ApplyCanvasButtonStyle(
+                enhanceButton,
+                new Color(1f, 0.52f, 0.025f, 1f),
+                new Color(1f, 0.83f, 0.2f, 1f),
+                new Color(0.02f, 0.045f, 0.09f, 1f));
+            Text enhanceLabel = enhanceButton.GetComponentInChildren<Text>();
+            Outline enhanceOutline = enhanceLabel.gameObject.AddComponent<Outline>();
+            enhanceOutline.effectColor = new Color(1f, 0.88f, 0.28f, 0.7f);
+            enhanceOutline.effectDistance = new Vector2(1.5f, -1.5f);
+            enhanceButton.onClick.AddListener(() => EnhanceClicked?.Invoke());
+            BuildEnhancementAnimationSkipToggle(panel.transform);
+
+            Text inventoryTitle = CreateText(
+                "보유 재료",
+                25,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                panel.transform);
+            SetRectAnchors(
+                inventoryTitle.gameObject,
+                0.28f,
+                0.118f,
+                0.72f,
+                0.152f);
+            inventoryTitle.color = new Color(0.22f, 0.78f, 1f, 1f);
+            CreateHorizontalDivider(
+                panel.transform,
+                0.135f,
+                new Color(0.05f, 0.34f, 0.58f, 0.62f),
+                0.035f,
+                0.27f);
+            CreateHorizontalDivider(
+                panel.transform,
+                0.135f,
+                new Color(0.05f, 0.34f, 0.58f, 0.62f),
+                0.73f,
+                0.965f);
+
+            GameObject materialRow = CreatePanel(
+                "Material Slots",
+                panel.transform,
+                new Color(0.004f, 0.014f, 0.035f, 0.9f));
+            SetRectAnchors(materialRow, 0.025f, 0.005f, 0.975f, 0.118f);
+            ApplyCanvasFrame(
+                materialRow,
+                new Color(0.004f, 0.018f, 0.042f, 0.96f),
+                new Color(0.04f, 0.28f, 0.5f, 0.84f),
+                1.5f);
             HorizontalLayoutGroup rowLayout = materialRow.AddComponent<HorizontalLayoutGroup>();
-            rowLayout.padding = new RectOffset(4, 4, 4, 4);
-            rowLayout.spacing = 6f;
+            rowLayout.padding = new RectOffset(8, 8, 7, 7);
+            rowLayout.spacing = 7f;
             rowLayout.childControlWidth = true;
             rowLayout.childControlHeight = true;
             rowLayout.childForceExpandWidth = true;
             rowLayout.childForceExpandHeight = true;
-            LayoutElement rowLayoutElement = materialRow.AddComponent<LayoutElement>();
-            rowLayoutElement.minHeight = 110f;
-            rowLayoutElement.preferredHeight = 110f;
 
             for (int i = 0; i < currencyButtons.Length; i++)
             {
@@ -534,26 +1020,166 @@ namespace StarForge.Presentation
 
         private void BuildResultPanel(RectTransform root)
         {
-            resultPanel = CreatePanel("Result Popup", root, new Color(0.02f, 0.025f, 0.05f, 0.96f));
+            resultPanel = CreatePanel(
+                "Result Popup",
+                root,
+                new Color(0.008f, 0.025f, 0.055f, 0.99f));
             RectTransform rect = resultPanel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.08f, 0.35f);
-            rect.anchorMax = new Vector2(0.92f, 0.65f);
+            rect.anchorMin = new Vector2(0.09f, 0.335f);
+            rect.anchorMax = new Vector2(0.91f, 0.7f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                resultPanel,
+                new Color(0.008f, 0.026f, 0.058f, 0.995f),
+                new Color(0.08f, 0.54f, 0.92f, 0.98f),
+                2f);
 
             VerticalLayoutGroup layout = resultPanel.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(28, 28, 28, 28);
-            layout.spacing = 18f;
+            layout.padding = new RectOffset(42, 42, 28, 32);
+            layout.spacing = 14f;
             layout.childAlignment = TextAnchor.MiddleCenter;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
 
-            resultTitleText = CreateText("결과", 42, FontStyle.Bold, TextAnchor.MiddleCenter, resultPanel.transform);
-            resultBodyText = CreateText("", 28, FontStyle.Normal, TextAnchor.MiddleCenter, resultPanel.transform);
+            GameObject alertBadge = CreatePanel(
+                "Result Alert Badge",
+                resultPanel.transform,
+                new Color(0.02f, 0.12f, 0.24f, 1f));
+            SetFixedLayoutSize(alertBadge, 46f, 46f);
+            LayoutElement alertLayout = alertBadge.GetComponent<LayoutElement>();
+            alertLayout.ignoreLayout = true;
+            RectTransform alertRect = alertBadge.GetComponent<RectTransform>();
+            alertRect.anchorMin = new Vector2(0.5f, 1f);
+            alertRect.anchorMax = new Vector2(0.5f, 1f);
+            alertRect.pivot = new Vector2(0.5f, 0.5f);
+            alertRect.sizeDelta = new Vector2(46f, 46f);
+            alertRect.anchoredPosition = new Vector2(0f, 1f);
+            alertRect.localEulerAngles = new Vector3(0f, 0f, 45f);
+            ApplyCanvasFrame(
+                alertBadge,
+                new Color(0.02f, 0.12f, 0.24f, 1f),
+                new Color(0.15f, 0.68f, 1f, 1f),
+                1.5f);
+            Text alertText = CreateText(
+                "!",
+                28,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                alertBadge.transform);
+            StretchRect(alertText.rectTransform, new Vector2(4f, 4f));
+            alertText.rectTransform.localEulerAngles = new Vector3(0f, 0f, -45f);
+            alertText.color = new Color(0.85f, 0.95f, 1f, 1f);
+
+            resultTitleText = CreateText(
+                "결과",
+                44,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                resultPanel.transform);
+            resultTitleText.color = new Color(0.96f, 0.98f, 1f, 1f);
+            SetPreferredHeight(resultTitleText, 62f);
+            resultBodyText = CreateText(
+                "",
+                27,
+                FontStyle.Normal,
+                TextAnchor.MiddleCenter,
+                resultPanel.transform);
+            resultBodyText.color = new Color(0.84f, 0.9f, 0.98f, 1f);
             resultBodyText.resizeTextForBestFit = true;
-            resultBodyText.resizeTextMinSize = 20;
-            resultBodyText.resizeTextMaxSize = 28;
+            resultBodyText.resizeTextMinSize = 18;
+            resultBodyText.resizeTextMaxSize = 27;
+            SetPreferredHeight(resultBodyText, 122f);
+
+            resultRewardRow = CreatePanel(
+                "Result Reward Row",
+                resultPanel.transform,
+                new Color(0.004f, 0.016f, 0.04f, 0.88f));
+            ApplyCanvasFrame(
+                resultRewardRow,
+                new Color(0.004f, 0.018f, 0.045f, 0.94f),
+                new Color(0.06f, 0.36f, 0.62f, 0.82f),
+                1.25f);
+            LayoutElement rewardRowLayout =
+                resultRewardRow.AddComponent<LayoutElement>();
+            rewardRowLayout.minHeight = 76f;
+            rewardRowLayout.preferredHeight = 76f;
+            HorizontalLayoutGroup rewardLayout =
+                resultRewardRow.AddComponent<HorizontalLayoutGroup>();
+            rewardLayout.padding = new RectOffset(12, 12, 8, 8);
+            rewardLayout.spacing = 8f;
+            rewardLayout.childAlignment = TextAnchor.MiddleCenter;
+            rewardLayout.childControlWidth = true;
+            rewardLayout.childControlHeight = true;
+            rewardLayout.childForceExpandWidth = true;
+            rewardLayout.childForceExpandHeight = true;
+
+            for (int i = 0; i < resultRewardIcons.Length; i++)
+            {
+                GameObject rewardSlot = CreatePanel(
+                    "Result Reward " + i,
+                    resultRewardRow.transform,
+                    new Color(0.008f, 0.03f, 0.065f, 0.96f));
+                ApplyCanvasFrame(
+                    rewardSlot,
+                    new Color(0.008f, 0.03f, 0.065f, 0.96f),
+                    new Color(0.05f, 0.28f, 0.48f, 0.78f),
+                    1f);
+                HorizontalLayoutGroup slotLayout =
+                    rewardSlot.AddComponent<HorizontalLayoutGroup>();
+                slotLayout.padding = new RectOffset(5, 5, 4, 4);
+                slotLayout.spacing = 3f;
+                slotLayout.childAlignment = TextAnchor.MiddleCenter;
+                slotLayout.childControlWidth = true;
+                slotLayout.childControlHeight = true;
+                slotLayout.childForceExpandWidth = false;
+                slotLayout.childForceExpandHeight = false;
+
+                GameObject iconObject = new GameObject(
+                    "Icon",
+                    typeof(RectTransform),
+                    typeof(Image),
+                    typeof(LayoutElement));
+                iconObject.transform.SetParent(rewardSlot.transform, false);
+                LayoutElement iconLayout =
+                    iconObject.GetComponent<LayoutElement>();
+                iconLayout.minWidth = 38f;
+                iconLayout.preferredWidth = 38f;
+                iconLayout.minHeight = 38f;
+                iconLayout.preferredHeight = 38f;
+                Image icon = iconObject.GetComponent<Image>();
+                icon.preserveAspect = true;
+                resultRewardIcons[i] = icon;
+
+                Text amount = CreateText(
+                    "+0",
+                    18,
+                    FontStyle.Bold,
+                    TextAnchor.MiddleLeft,
+                    rewardSlot.transform);
+                amount.resizeTextForBestFit = true;
+                amount.resizeTextMinSize = 12;
+                amount.resizeTextMaxSize = 18;
+                amount.color = new Color(1f, 0.76f, 0.3f, 1f);
+                resultRewardTexts[i] = amount;
+            }
+
+            resultRewardRow.SetActive(false);
 
             Button closeButton = CreateButton("확인", 28, resultPanel.transform);
-            closeButton.GetComponent<LayoutElement>().preferredHeight = 72f;
+            LayoutElement closeLayout = closeButton.GetComponent<LayoutElement>();
+            closeLayout.preferredHeight = 70f;
+            closeLayout.minHeight = 70f;
+            closeLayout.minWidth = 320f;
+            closeLayout.preferredWidth = 320f;
+            closeLayout.flexibleWidth = 0f;
+            ApplyCanvasButtonStyle(
+                closeButton,
+                new Color(0.025f, 0.1f, 0.2f, 1f),
+                new Color(0.08f, 0.55f, 0.94f, 1f),
+                new Color(0.94f, 0.98f, 1f, 1f));
             closeButton.onClick.AddListener(() => resultPanel.SetActive(false));
 
             resultPanel.SetActive(false);
@@ -561,31 +1187,124 @@ namespace StarForge.Presentation
 
         private void BuildSettingsPanel(RectTransform root)
         {
-            settingsPanel = CreatePanel("Settings Popup", root, new Color(0.02f, 0.025f, 0.05f, 0.96f));
+            settingsPanel = CreatePanel(
+                "Settings Popup",
+                root,
+                new Color(0.008f, 0.025f, 0.055f, 0.99f));
             RectTransform rect = settingsPanel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.08f, 0.28f);
-            rect.anchorMax = new Vector2(0.92f, 0.72f);
+            rect.anchorMin = new Vector2(0.08f, 0.1f);
+            rect.anchorMax = new Vector2(0.92f, 0.9f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                settingsPanel,
+                new Color(0.008f, 0.026f, 0.058f, 0.995f),
+                new Color(0.08f, 0.54f, 0.92f, 0.98f),
+                2f);
 
             VerticalLayoutGroup layout = settingsPanel.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(30, 30, 30, 30);
-            layout.spacing = 18f;
+            layout.padding = new RectOffset(24, 24, 18, 18);
+            layout.spacing = 10f;
             layout.childAlignment = TextAnchor.MiddleCenter;
+            layout.childControlWidth = true;
+            layout.childControlHeight = true;
+            layout.childForceExpandWidth = true;
+            layout.childForceExpandHeight = false;
 
-            CreateText("설정", 42, FontStyle.Bold, TextAnchor.MiddleCenter, settingsPanel.transform);
-            soundToggle = CreateToggle("효과음", settingsPanel.transform);
+            Text settingsTitle = CreateText("설정", 36, FontStyle.Bold, TextAnchor.MiddleCenter, settingsPanel.transform);
+            settingsTitle.color = new Color(0.95f, 0.98f, 1f, 1f);
+            SetPreferredHeight(settingsTitle, 46f);
+            soundToggle = CreateToggle("전체 사운드", settingsPanel.transform);
             soundToggle.onValueChanged.AddListener(value => SoundToggled?.Invoke(value));
+            bgmVolumeSlider = CreateVolumeSlider(
+                "배경음악",
+                settingsPanel.transform,
+                out bgmVolumeValueText);
+            bgmVolumeSlider.onValueChanged.AddListener(value =>
+            {
+                UpdateVolumeValueText(bgmVolumeValueText, value);
+                BgmVolumeChanged?.Invoke(value);
+            });
+            sfxVolumeSlider = CreateVolumeSlider(
+                "효과음",
+                settingsPanel.transform,
+                out sfxVolumeValueText);
+            sfxVolumeSlider.onValueChanged.AddListener(value =>
+            {
+                UpdateVolumeValueText(sfxVolumeValueText, value);
+                SfxVolumeChanged?.Invoke(value);
+            });
             vibrationToggle = CreateToggle("진동", settingsPanel.transform);
             vibrationToggle.onValueChanged.AddListener(value => VibrationToggled?.Invoke(value));
 
+            GameObject policyRow = new GameObject(
+                "Policy Links",
+                typeof(RectTransform),
+                typeof(VerticalLayoutGroup),
+                typeof(LayoutElement));
+            policyRow.transform.SetParent(settingsPanel.transform, false);
+            VerticalLayoutGroup policyLayout =
+                policyRow.GetComponent<VerticalLayoutGroup>();
+            policyLayout.spacing = 8f;
+            policyLayout.childAlignment = TextAnchor.MiddleCenter;
+            policyLayout.childControlWidth = true;
+            policyLayout.childForceExpandWidth = true;
+            policyLayout.childControlHeight = true;
+            policyLayout.childForceExpandHeight = false;
+            LayoutElement policyRowLayout =
+                policyRow.GetComponent<LayoutElement>();
+            policyRowLayout.minHeight = 148f;
+            policyRowLayout.preferredHeight = 150f;
+
+            Button privacyButton = CreateButton(
+                "개인정보처리방침",
+                18,
+                policyRow.transform);
+            LayoutElement privacyLayout =
+                privacyButton.GetComponent<LayoutElement>();
+            privacyLayout.minHeight = 42f;
+            privacyLayout.preferredHeight = 44f;
+            privacyButton.onClick.AddListener(
+                StarForgeLegal.OpenPrivacyPolicy);
+
+            Button termsButton = CreateButton(
+                "이용약관",
+                18,
+                policyRow.transform);
+            LayoutElement termsLayout =
+                termsButton.GetComponent<LayoutElement>();
+            termsLayout.minHeight = 42f;
+            termsLayout.preferredHeight = 44f;
+            termsButton.onClick.AddListener(
+                StarForgeLegal.OpenTermsOfService);
+
+            Button advertisingPrivacyOptionsButton = CreateButton(
+                "광고 개인정보 설정",
+                18,
+                policyRow.transform);
+            LayoutElement advertisingPrivacyOptionsLayout =
+                advertisingPrivacyOptionsButton.GetComponent<LayoutElement>();
+            advertisingPrivacyOptionsLayout.minHeight = 42f;
+            advertisingPrivacyOptionsLayout.preferredHeight = 44f;
+            advertisingPrivacyOptionsButton.onClick.AddListener(
+                () => AdvertisingPrivacyOptionsRequested?.Invoke());
+
             Button resetButton = CreateButton("데이터 초기화", 28, settingsPanel.transform);
-            resetButton.GetComponent<LayoutElement>().preferredHeight = 72f;
-            resetButton.image.color = new Color(0.55f, 0.18f, 0.18f, 1f);
+            resetButton.GetComponent<LayoutElement>().preferredHeight = 58f;
+            ApplyCanvasButtonStyle(
+                resetButton,
+                new Color(0.22f, 0.025f, 0.035f, 1f),
+                new Color(0.78f, 0.12f, 0.16f, 1f),
+                new Color(1f, 0.46f, 0.48f, 1f));
             resetButton.onClick.AddListener(() => resetConfirmPanel.SetActive(true));
 
             Button closeButton = CreateButton("닫기", 28, settingsPanel.transform);
-            closeButton.GetComponent<LayoutElement>().preferredHeight = 72f;
+            closeButton.GetComponent<LayoutElement>().preferredHeight = 58f;
+            ApplyCanvasButtonStyle(
+                closeButton,
+                new Color(0.018f, 0.055f, 0.12f, 1f),
+                new Color(0.12f, 0.42f, 0.7f, 1f),
+                new Color(0.88f, 0.95f, 1f, 1f));
             closeButton.onClick.AddListener(() => settingsPanel.SetActive(false));
 
             settingsPanel.SetActive(false);
@@ -599,13 +1318,19 @@ namespace StarForge.Presentation
             rect.anchorMax = new Vector2(0.92f, 0.65f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                resetConfirmPanel,
+                new Color(0.03f, 0.025f, 0.045f, 0.99f),
+                new Color(0.72f, 0.18f, 0.2f, 0.98f),
+                2f);
 
             VerticalLayoutGroup layout = resetConfirmPanel.AddComponent<VerticalLayoutGroup>();
             layout.padding = new RectOffset(30, 30, 30, 30);
             layout.spacing = 18f;
             layout.childAlignment = TextAnchor.MiddleCenter;
 
-            CreateText("데이터 초기화", 40, FontStyle.Bold, TextAnchor.MiddleCenter, resetConfirmPanel.transform);
+            Text resetTitle = CreateText("데이터 초기화", 40, FontStyle.Bold, TextAnchor.MiddleCenter, resetConfirmPanel.transform);
+            resetTitle.color = new Color(1f, 0.48f, 0.5f, 1f);
             Text body = CreateText("모든 강화 기록과 재화가 삭제됩니다.\n정말 초기화할까요?", 28, FontStyle.Normal, TextAnchor.MiddleCenter, resetConfirmPanel.transform);
             body.resizeTextForBestFit = true;
             body.resizeTextMinSize = 20;
@@ -619,7 +1344,11 @@ namespace StarForge.Presentation
             row.AddComponent<LayoutElement>().preferredHeight = 72f;
 
             Button confirmButton = CreateButton("초기화", 26, row.transform);
-            confirmButton.image.color = new Color(0.55f, 0.18f, 0.18f, 1f);
+            ApplyCanvasButtonStyle(
+                confirmButton,
+                new Color(0.22f, 0.025f, 0.035f, 1f),
+                new Color(0.82f, 0.1f, 0.14f, 1f),
+                new Color(1f, 0.55f, 0.56f, 1f));
             confirmButton.onClick.AddListener(() =>
             {
                 resetConfirmPanel.SetActive(false);
@@ -628,6 +1357,11 @@ namespace StarForge.Presentation
             });
 
             Button cancelButton = CreateButton("취소", 26, row.transform);
+            ApplyCanvasButtonStyle(
+                cancelButton,
+                new Color(0.018f, 0.055f, 0.12f, 1f),
+                new Color(0.12f, 0.42f, 0.7f, 1f),
+                new Color(0.88f, 0.95f, 1f, 1f));
             cancelButton.onClick.AddListener(() => resetConfirmPanel.SetActive(false));
 
             resetConfirmPanel.SetActive(false);
@@ -654,7 +1388,11 @@ namespace StarForge.Presentation
             dialogRect.anchorMax = new Vector2(0.94f, 0.76f);
             dialogRect.offsetMin = Vector2.zero;
             dialogRect.offsetMax = Vector2.zero;
-            AddPanelOutline(dialog, new Color(0.28f, 0.12f, 0.46f, 0.95f), new Vector2(2f, -2f));
+            ApplyCanvasFrame(
+                dialog,
+                new Color(0.012f, 0.028f, 0.06f, 0.99f),
+                new Color(0.1f, 0.48f, 0.76f, 0.98f),
+                2f);
 
             VerticalLayoutGroup layout = dialog.AddComponent<VerticalLayoutGroup>();
             layout.padding = new RectOffset(14, 14, 12, 12);
@@ -837,10 +1575,10 @@ namespace StarForge.Presentation
                 colors.pressedColor = new Color(0.09f, 0.035f, 0.14f, 1f);
                 colors.disabledColor = new Color(0.07f, 0.045f, 0.09f, 0.95f);
                 button.colors = colors;
-                AddFourSideBorder(
+                AddPanelOutline(
                     button.gameObject,
-                    new Color(0.48f, 0.22f, 0.66f, 1f),
-                    2f);
+                    new Color(0.34f, 0.22f, 0.72f, 0.96f),
+                    new Vector2(1.5f, -1.5f));
 
                 Text routeStatusText = CreateText(
                     "",
@@ -909,7 +1647,11 @@ namespace StarForge.Presentation
             dialogRect.anchorMax = new Vector2(0.87f, 0.66f);
             dialogRect.offsetMin = Vector2.zero;
             dialogRect.offsetMax = Vector2.zero;
-            AddFourSideBorder(dialog, new Color(0.48f, 0.22f, 0.66f, 1f), 3f);
+            ApplyCanvasFrame(
+                dialog,
+                new Color(0.018f, 0.035f, 0.075f, 1f),
+                new Color(0.34f, 0.24f, 0.72f, 1f),
+                2f);
 
             VerticalLayoutGroup layout = dialog.AddComponent<VerticalLayoutGroup>();
             layout.padding = new RectOffset(24, 24, 22, 22);
@@ -1017,7 +1759,11 @@ namespace StarForge.Presentation
                 typeof(LayoutElement));
             inputObject.transform.SetParent(parent, false);
             inputObject.GetComponent<Image>().color = new Color(0.02f, 0.05f, 0.075f, 1f);
-            AddFourSideBorder(inputObject, new Color(0.12f, 0.42f, 0.52f, 1f), 2f);
+            ApplyCanvasFrame(
+                inputObject,
+                new Color(0.012f, 0.045f, 0.08f, 1f),
+                new Color(0.12f, 0.48f, 0.68f, 1f),
+                2f);
 
             Text inputText = CreateText(
                 "",
@@ -1232,7 +1978,11 @@ namespace StarForge.Presentation
             cardLayout.minHeight = 68f;
             cardLayout.preferredHeight = 68f;
             cardLayout.flexibleHeight = 0f;
-            AddFourSideBorder(card, new Color(0.12f, 0.34f, 0.4f, 1f), 2f);
+            ApplyCanvasFrame(
+                card,
+                new Color(0.02f, 0.055f, 0.085f, 1f),
+                new Color(0.1f, 0.38f, 0.52f, 0.96f),
+                2f);
 
             HorizontalLayoutGroup layout = card.AddComponent<HorizontalLayoutGroup>();
             layout.padding = new RectOffset(8, 8, 5, 5);
@@ -1302,415 +2052,386 @@ namespace StarForge.Presentation
             collectionPanel = CreatePanel(
                 "Star Collection Overlay",
                 root,
-                new Color(0.005f, 0.009f, 0.02f, 0.99f));
+                new Color(0.001f, 0.002f, 0.008f, 1f));
             RectTransform overlayRect = collectionPanel.GetComponent<RectTransform>();
             overlayRect.anchorMin = Vector2.zero;
             overlayRect.anchorMax = Vector2.one;
             overlayRect.offsetMin = Vector2.zero;
             overlayRect.offsetMax = Vector2.zero;
 
-            GameObject dialog = CreatePanel(
-                "Star Collection",
-                collectionPanel.transform,
-                new Color(0.018f, 0.028f, 0.055f, 1f));
-            RectTransform dialogRect = dialog.GetComponent<RectTransform>();
-            dialogRect.anchorMin = new Vector2(0.035f, 0.035f);
-            dialogRect.anchorMax = new Vector2(0.965f, 0.965f);
-            dialogRect.offsetMin = Vector2.zero;
-            dialogRect.offsetMax = Vector2.zero;
-            AddFourSideBorder(dialog, new Color(0.12f, 0.38f, 0.42f, 1f), 2f);
-
-            VerticalLayoutGroup layout = dialog.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(16, 16, 16, 16);
-            layout.spacing = 8f;
-            layout.childControlWidth = true;
-            layout.childControlHeight = true;
-            layout.childForceExpandWidth = true;
-            layout.childForceExpandHeight = false;
-            layout.childAlignment = TextAnchor.MiddleCenter;
-
-            Text title = CreateText(
-                "별의 도감",
-                34,
-                FontStyle.Bold,
-                TextAnchor.MiddleCenter,
-                dialog.transform);
-            title.color = new Color(0.78f, 0.96f, 1f, 1f);
-            SetPreferredHeight(title, 44f);
-
-            collectionProgressText = CreateText(
-                "",
-                18,
-                FontStyle.Bold,
-                TextAnchor.MiddleCenter,
-                dialog.transform);
-            collectionProgressText.color = new Color(0.55f, 0.75f, 0.84f, 1f);
-            SetPreferredHeight(collectionProgressText, 30f);
-
-            GameObject scrollView = CreatePanel(
-                "Collection Scroll View",
-                dialog.transform,
-                new Color(0.008f, 0.015f, 0.03f, 0.9f));
-            LayoutElement scrollLayout = scrollView.AddComponent<LayoutElement>();
-            scrollLayout.minHeight = 600f;
-            scrollLayout.flexibleHeight = 1f;
-
-            collectionScrollRect = scrollView.AddComponent<ScrollRect>();
-            collectionScrollRect.horizontal = false;
-            collectionScrollRect.vertical = true;
-            collectionScrollRect.movementType = ScrollRect.MovementType.Clamped;
-            collectionScrollRect.inertia = true;
-            collectionScrollRect.scrollSensitivity = 32f;
-
-            GameObject viewport = new GameObject(
-                "Viewport",
-                typeof(RectTransform),
-                typeof(Image),
-                typeof(Mask));
-            viewport.transform.SetParent(scrollView.transform, false);
-            RectTransform viewportRect = viewport.GetComponent<RectTransform>();
-            viewportRect.anchorMin = Vector2.zero;
-            viewportRect.anchorMax = Vector2.one;
-            viewportRect.offsetMin = new Vector2(4f, 4f);
-            viewportRect.offsetMax = new Vector2(-22f, -4f);
-            viewport.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.01f);
-            viewport.GetComponent<Mask>().showMaskGraphic = false;
-
-            GameObject content = new GameObject(
-                "Content",
-                typeof(RectTransform),
-                typeof(GridLayoutGroup),
-                typeof(ContentSizeFitter));
-            content.transform.SetParent(viewport.transform, false);
-            RectTransform contentRect = content.GetComponent<RectTransform>();
-            contentRect.anchorMin = new Vector2(0f, 1f);
-            contentRect.anchorMax = new Vector2(1f, 1f);
-            contentRect.pivot = new Vector2(0.5f, 1f);
-            contentRect.anchoredPosition = Vector2.zero;
-            contentRect.sizeDelta = Vector2.zero;
-
-            collectionGrid = content.GetComponent<GridLayoutGroup>();
-            collectionGrid.padding = new RectOffset(8, 8, 4, 4);
-            collectionGrid.spacing = new Vector2(10f, 10f);
-            collectionGrid.cellSize = new Vector2(280f, 164f);
-            collectionGrid.startCorner = GridLayoutGroup.Corner.UpperLeft;
-            collectionGrid.startAxis = GridLayoutGroup.Axis.Horizontal;
-            collectionGrid.childAlignment = TextAnchor.UpperCenter;
-            collectionGrid.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
-            collectionGrid.constraintCount = 2;
-
-            ContentSizeFitter fitter = content.GetComponent<ContentSizeFitter>();
-            fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
-            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-            GameObject scrollbarObject = CreatePanel(
-                "Scrollbar Vertical",
-                scrollView.transform,
-                new Color(0.025f, 0.04f, 0.065f, 1f));
-            RectTransform scrollbarRect = scrollbarObject.GetComponent<RectTransform>();
-            scrollbarRect.anchorMin = new Vector2(1f, 0f);
-            scrollbarRect.anchorMax = new Vector2(1f, 1f);
-            scrollbarRect.pivot = new Vector2(1f, 0.5f);
-            scrollbarRect.offsetMin = new Vector2(-14f, 4f);
-            scrollbarRect.offsetMax = new Vector2(-4f, -4f);
-
-            GameObject handleObject = CreatePanel(
-                "Handle",
-                scrollbarObject.transform,
-                new Color(0.12f, 0.42f, 0.46f, 1f));
-            RectTransform handleRect = handleObject.GetComponent<RectTransform>();
-            handleRect.anchorMin = Vector2.zero;
-            handleRect.anchorMax = Vector2.one;
-            handleRect.offsetMin = Vector2.zero;
-            handleRect.offsetMax = Vector2.zero;
-
-            Scrollbar scrollbar = scrollbarObject.AddComponent<Scrollbar>();
-            scrollbar.handleRect = handleRect;
-            scrollbar.targetGraphic = handleObject.GetComponent<Image>();
-            scrollbar.direction = Scrollbar.Direction.BottomToTop;
-
-            collectionScrollRect.viewport = viewportRect;
-            collectionScrollRect.content = contentRect;
-            collectionScrollRect.verticalScrollbar = scrollbar;
-            collectionScrollRect.verticalScrollbarVisibility =
-                ScrollRect.ScrollbarVisibility.Permanent;
-            collectionViewportRect = viewportRect;
-
-            int cardCount = Mathf.Max(1, balance.maxLevel + 1);
-            collectionCards = new CollectionCard[cardCount];
-            for (int level = 0; level < cardCount; level++)
-            {
-                collectionCards[level] = CreateCollectionCard(level, content.transform);
-            }
-
-            Button closeButton = CreateButton("닫기", 24, dialog.transform);
-            closeButton.GetComponent<LayoutElement>().preferredHeight = 52f;
-            closeButton.onClick.AddListener(CloseCollectionPanel);
-
-            BuildCollectionDetailPanel(collectionPanel.transform);
-            collectionPanel.SetActive(false);
-        }
-
-        private CollectionCard CreateCollectionCard(int level, Transform parent)
-        {
-            GameObject cardObject = new GameObject(
-                "Collection Stage " + level,
-                typeof(RectTransform),
-                typeof(Image),
-                typeof(Button));
-            cardObject.transform.SetParent(parent, false);
-
-            Image background = cardObject.GetComponent<Image>();
-            background.color = new Color(0.035f, 0.07f, 0.09f, 1f);
-            AddFourSideBorder(cardObject, new Color(0.1f, 0.32f, 0.36f, 1f), 2f);
-
-            Button button = cardObject.GetComponent<Button>();
-            ColorBlock colors = button.colors;
-            colors.normalColor = new Color(0.035f, 0.07f, 0.09f, 1f);
-            colors.highlightedColor = new Color(0.07f, 0.15f, 0.18f, 1f);
-            colors.pressedColor = new Color(0.02f, 0.045f, 0.06f, 1f);
-            colors.disabledColor = new Color(0.018f, 0.025f, 0.035f, 1f);
-            button.colors = colors;
-
-            GameObject portraitObject = new GameObject(
-                "Planet Portrait",
-                typeof(RectTransform),
-                typeof(Image),
-                typeof(Mask));
-            portraitObject.transform.SetParent(cardObject.transform, false);
-            RectTransform portraitRect = portraitObject.GetComponent<RectTransform>();
-            portraitRect.anchorMin = new Vector2(0f, 0.5f);
-            portraitRect.anchorMax = new Vector2(0f, 0.5f);
-            portraitRect.pivot = new Vector2(0.5f, 0.5f);
-            portraitRect.anchoredPosition = new Vector2(68f, 0f);
-            portraitRect.sizeDelta = new Vector2(108f, 108f);
-            Image portraitMask = portraitObject.GetComponent<Image>();
-            portraitMask.sprite = GetCollectionCircleSprite();
-            portraitMask.color = Color.white;
-            portraitObject.GetComponent<Mask>().showMaskGraphic = false;
-
-            GameObject imageObject = new GameObject(
-                "Planet Surface",
-                typeof(RectTransform),
-                typeof(RawImage),
-                typeof(AspectRatioFitter));
-            imageObject.transform.SetParent(portraitObject.transform, false);
-            RectTransform imageRect = imageObject.GetComponent<RectTransform>();
-            imageRect.anchorMin = Vector2.zero;
-            imageRect.anchorMax = Vector2.one;
-            imageRect.offsetMin = Vector2.zero;
-            imageRect.offsetMax = Vector2.zero;
-            RawImage planetImage = imageObject.GetComponent<RawImage>();
-            planetImage.uvRect = new Rect(0.25f, 0f, 0.5f, 1f);
-            planetImage.raycastTarget = false;
-            AspectRatioFitter portraitAspect = imageObject.GetComponent<AspectRatioFitter>();
-            portraitAspect.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
-            portraitAspect.aspectRatio = 1f;
-
-            Text levelText = CreateText(
-                level + "강",
-                22,
-                FontStyle.Bold,
-                TextAnchor.MiddleLeft,
-                cardObject.transform);
-            RectTransform levelRect = levelText.GetComponent<RectTransform>();
-            levelRect.anchorMin = new Vector2(0f, 0.52f);
-            levelRect.anchorMax = new Vector2(1f, 0.85f);
-            levelRect.offsetMin = new Vector2(132f, 0f);
-            levelRect.offsetMax = new Vector2(-12f, 0f);
-
-            Text nameText = CreateText(
-                "미발견",
-                18,
-                FontStyle.Bold,
-                TextAnchor.MiddleLeft,
-                cardObject.transform);
-            RectTransform nameRect = nameText.GetComponent<RectTransform>();
-            nameRect.anchorMin = new Vector2(0f, 0.18f);
-            nameRect.anchorMax = new Vector2(1f, 0.55f);
-            nameRect.offsetMin = new Vector2(132f, 0f);
-            nameRect.offsetMax = new Vector2(-12f, 0f);
-            nameText.resizeTextForBestFit = true;
-            nameText.resizeTextMinSize = 13;
-            nameText.resizeTextMaxSize = 18;
-
-            int capturedLevel = level;
-            button.onClick.AddListener(() => OpenCollectionDetail(capturedLevel));
-
-            CollectionCard card = new CollectionCard();
-            card.level = level;
-            card.button = button;
-            card.planetImage = planetImage;
-            card.levelText = levelText;
-            card.nameText = nameText;
-            return card;
-        }
-
-        private void BuildCollectionDetailPanel(Transform parent)
-        {
-            collectionDetailPanel = CreatePanel(
-                "Collection Detail Overlay",
-                parent,
-                new Color(0.003f, 0.006f, 0.015f, 0.985f));
-            RectTransform overlayRect = collectionDetailPanel.GetComponent<RectTransform>();
-            overlayRect.anchorMin = Vector2.zero;
-            overlayRect.anchorMax = Vector2.one;
-            overlayRect.offsetMin = Vector2.zero;
-            overlayRect.offsetMax = Vector2.zero;
-
-            GameObject card = CreatePanel(
-                "Collection Detail Card",
-                collectionDetailPanel.transform,
-                new Color(0.012f, 0.02f, 0.04f, 1f));
-            RectTransform cardRect = card.GetComponent<RectTransform>();
-            cardRect.anchorMin = new Vector2(0.07f, 0.08f);
-            cardRect.anchorMax = new Vector2(0.93f, 0.92f);
-            cardRect.offsetMin = Vector2.zero;
-            cardRect.offsetMax = Vector2.zero;
-            AddFourSideBorder(card, new Color(0.14f, 0.44f, 0.48f, 1f), 3f);
-
-            collectionDetailTitleText = CreateText(
-                "",
-                34,
-                FontStyle.Bold,
-                TextAnchor.MiddleCenter,
-                card.transform);
-            RectTransform titleRect = collectionDetailTitleText.GetComponent<RectTransform>();
-            titleRect.anchorMin = new Vector2(0.08f, 0.86f);
-            titleRect.anchorMax = new Vector2(0.92f, 0.95f);
-            titleRect.offsetMin = Vector2.zero;
-            titleRect.offsetMax = Vector2.zero;
-            collectionDetailTitleText.color = new Color(0.86f, 0.98f, 1f, 1f);
-
-            collectionDetailLevelText = CreateText(
-                "",
-                20,
-                FontStyle.Bold,
-                TextAnchor.MiddleCenter,
-                card.transform);
-            RectTransform levelRect = collectionDetailLevelText.GetComponent<RectTransform>();
-            levelRect.anchorMin = new Vector2(0.08f, 0.8f);
-            levelRect.anchorMax = new Vector2(0.92f, 0.86f);
-            levelRect.offsetMin = Vector2.zero;
-            levelRect.offsetMax = Vector2.zero;
-            collectionDetailLevelText.color = new Color(0.48f, 0.78f, 0.88f, 1f);
-
-            GameObject previewRegion = new GameObject(
-                "Collection Planet Preview Region",
-                typeof(RectTransform));
-            previewRegion.transform.SetParent(card.transform, false);
-            RectTransform previewRegionRect = previewRegion.GetComponent<RectTransform>();
-            previewRegionRect.anchorMin = new Vector2(0.05f, 0.12f);
-            previewRegionRect.anchorMax = new Vector2(0.95f, 0.79f);
-            previewRegionRect.offsetMin = Vector2.zero;
-            previewRegionRect.offsetMax = Vector2.zero;
-
             GameObject previewObject = new GameObject(
-                "Collection Planet Preview",
+                "Collection Space View",
                 typeof(RectTransform),
                 typeof(RawImage),
-                typeof(AspectRatioFitter));
-            previewObject.transform.SetParent(previewRegion.transform, false);
+                typeof(StarForgeDragRotationInput));
+            previewObject.transform.SetParent(collectionPanel.transform, false);
             RectTransform previewRect = previewObject.GetComponent<RectTransform>();
             previewRect.anchorMin = Vector2.zero;
             previewRect.anchorMax = Vector2.one;
             previewRect.offsetMin = Vector2.zero;
             previewRect.offsetMax = Vector2.zero;
-            collectionDetailPlanetImage = previewObject.GetComponent<RawImage>();
-            collectionDetailPlanetImage.color = Color.white;
-            collectionDetailPlanetImage.raycastTarget = false;
-            collectionDetailPlanetImage.uvRect = new Rect(0f, 0f, 1f, 1f);
-            AspectRatioFitter previewAspect = previewObject.GetComponent<AspectRatioFitter>();
-            previewAspect.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
-            previewAspect.aspectRatio = 1f;
+            collectionPlanetImage = previewObject.GetComponent<RawImage>();
+            collectionPlanetImage.color = Color.white;
+            collectionPlanetImage.raycastTarget = true;
+            collectionPlanetImage.uvRect = new Rect(0f, 0f, 1f, 1f);
+            StarForgeDragRotationInput collectionDragInput =
+                previewObject.GetComponent<StarForgeDragRotationInput>();
+            collectionDragInput.Dragged += delta =>
+            {
+                if (!collectionTransitioning && collectionPreview != null)
+                {
+                    collectionPreview.OrbitCurrentCamera(delta);
+                }
+            };
 
             GameObject collectionPreviewObject = new GameObject("StarForge Collection Preview");
             collectionPreview = collectionPreviewObject.AddComponent<StarForgeCollectionPreview>();
-            collectionDetailPlanetImage.texture = collectionPreview.OutputTexture;
+            collectionPlanetImage.texture = collectionPreview.OutputTexture;
             collectionPreview.Hide();
 
-            Button closeButton = CreateButton("닫기", 22, card.transform);
-            RectTransform closeRect = closeButton.GetComponent<RectTransform>();
-            closeRect.anchorMin = new Vector2(0.34f, 0.025f);
-            closeRect.anchorMax = new Vector2(0.66f, 0.095f);
-            closeRect.offsetMin = Vector2.zero;
-            closeRect.offsetMax = Vector2.zero;
-            closeButton.onClick.AddListener(CloseCollectionDetail);
+            Button exitButton = CreateButton("나가기", 22, collectionPanel.transform);
+            RectTransform exitRect = exitButton.GetComponent<RectTransform>();
+            exitRect.anchorMin = new Vector2(0.025f, 0.875f);
+            exitRect.anchorMax = new Vector2(0.205f, 0.94f);
+            exitRect.offsetMin = Vector2.zero;
+            exitRect.offsetMax = Vector2.zero;
+            exitButton.image.color = new Color(0.005f, 0.01f, 0.025f, 0.62f);
+            StyleCollectionSpaceButton(
+                exitButton,
+                new Color(0.16f, 0.72f, 1f, 1f));
+            exitButton.onClick.AddListener(CloseCollectionPanel);
 
-            collectionDetailPanel.SetActive(false);
+            string[] shapeLabels = { "일반 별", "하트별", "고양이별" };
+            for (int i = 0; i < collectionShapeButtons.Length; i++)
+            {
+                int shapeIndex = i;
+                Button shapeButton = CreateButton(
+                    shapeLabels[i],
+                    17,
+                    collectionPanel.transform);
+                collectionShapeButtons[i] = shapeButton;
+                collectionShapeButtonTexts[i] = shapeButton.GetComponentInChildren<Text>();
+
+                RectTransform shapeRect = shapeButton.GetComponent<RectTransform>();
+                float left = 0.215f + i * 0.19f;
+                shapeRect.anchorMin = new Vector2(left, 0.875f);
+                shapeRect.anchorMax = new Vector2(left + 0.18f, 0.94f);
+                shapeRect.offsetMin = Vector2.zero;
+                shapeRect.offsetMax = Vector2.zero;
+                StyleCollectionSpaceButton(
+                    shapeButton,
+                    new Color(0.58f, 0.28f, 1f, 1f));
+                collectionShapeLockIcons[i] =
+                    i == 0 ? null : CreateCollectionLockIcon(shapeButton.transform);
+                shapeButton.onClick.AddListener(
+                    () => SelectCollectionShape((StarForgePlanetShape)shapeIndex));
+            }
+
+            collectionSkipToggle = CreateCollectionSkipToggle(collectionPanel.transform);
+            RectTransform skipToggleRect =
+                collectionSkipToggle.GetComponent<RectTransform>();
+            skipToggleRect.anchorMin = new Vector2(0.795f, 0.875f);
+            skipToggleRect.anchorMax = new Vector2(0.975f, 0.94f);
+            skipToggleRect.offsetMin = Vector2.zero;
+            skipToggleRect.offsetMax = Vector2.zero;
+            collectionSkipToggle.SetIsOnWithoutNotify(false);
+            collectionSkipToggle.onValueChanged.AddListener(
+                OnCollectionSkipToggleChanged);
+
+            collectionTitleText = CreateText(
+                "",
+                30,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                collectionPanel.transform);
+            RectTransform titleRect = collectionTitleText.GetComponent<RectTransform>();
+            titleRect.anchorMin = new Vector2(0.12f, 0.76f);
+            titleRect.anchorMax = new Vector2(0.88f, 0.825f);
+            titleRect.offsetMin = Vector2.zero;
+            titleRect.offsetMax = Vector2.zero;
+            collectionTitleText.resizeTextForBestFit = true;
+            collectionTitleText.resizeTextMinSize = 18;
+            collectionTitleText.resizeTextMaxSize = 30;
+
+            collectionPreviousButton = CreateButton("<", 48, collectionPanel.transform);
+            RectTransform previousRect = collectionPreviousButton.GetComponent<RectTransform>();
+            previousRect.anchorMin = new Vector2(0.015f, 0.405f);
+            previousRect.anchorMax = new Vector2(0.13f, 0.515f);
+            previousRect.offsetMin = Vector2.zero;
+            previousRect.offsetMax = Vector2.zero;
+            StyleCollectionArrowButton(collectionPreviousButton);
+            collectionPreviousButton.onClick.AddListener(() => NavigateCollection(-1));
+
+            collectionNextButton = CreateButton(">", 48, collectionPanel.transform);
+            RectTransform nextRect = collectionNextButton.GetComponent<RectTransform>();
+            nextRect.anchorMin = new Vector2(0.87f, 0.405f);
+            nextRect.anchorMax = new Vector2(0.985f, 0.515f);
+            nextRect.offsetMin = Vector2.zero;
+            nextRect.offsetMax = Vector2.zero;
+            StyleCollectionArrowButton(collectionNextButton);
+            collectionNextButton.onClick.AddListener(() => NavigateCollection(1));
+
+            collectionMaxUnlockedLevel = 0;
+            RefreshCollectionShapeButtons();
+            collectionPanel.SetActive(false);
         }
 
         private void OpenCollectionPanel()
         {
-            if (collectionPanel == null)
+            if (collectionPanel == null || balanceRef == null)
             {
                 return;
             }
 
-            CloseCollectionDetail();
+            collectionTransitioning = false;
+            if (!IsCollectionShapeDiscovered(collectionShape))
+            {
+                collectionShape = StarForgePlanetShape.Default;
+            }
+
+            collectionMaxUnlockedLevel =
+                GetCollectionShapeMaxLevel(collectionShape);
+            collectionCurrentLevel = Mathf.Clamp(
+                collectionCurrentLevel,
+                0,
+                collectionMaxUnlockedLevel);
+            collectionPreview.ResetCameraOrbit();
             collectionPanel.SetActive(true);
-            Canvas.ForceUpdateCanvases();
-            RefreshCollectionGridLayout();
-            Canvas.ForceUpdateCanvases();
-            collectionScrollRect.verticalNormalizedPosition = 1f;
-        }
-
-        private void RefreshCollectionGridLayout()
-        {
-            if (collectionGrid == null || collectionViewportRect == null)
-            {
-                return;
-            }
-
-            float availableWidth =
-                collectionViewportRect.rect.width -
-                collectionGrid.padding.horizontal -
-                collectionGrid.spacing.x;
-            float cardWidth = Mathf.Floor(availableWidth * 0.5f);
-            if (cardWidth <= 0f)
-            {
-                return;
-            }
-
-            collectionGrid.cellSize = new Vector2(cardWidth, 164f);
+            collectionPanel.transform.SetAsLastSibling();
+            ShowCurrentCollectionStage();
         }
 
         private void CloseCollectionPanel()
         {
-            CloseCollectionDetail();
-            collectionPanel.SetActive(false);
-        }
-
-        private void OpenCollectionDetail(int level)
-        {
-            if (balanceRef == null ||
-                collectionDetailPanel == null ||
-                collectionCards == null ||
-                level < 0 ||
-                level >= collectionCards.Length ||
-                !collectionCards[level].button.interactable)
-            {
-                return;
-            }
-
-            StageVisualConfig stage = balanceRef.GetStage(level);
-            collectionDetailTitleText.text = stage.displayName;
-            collectionDetailTitleText.color = GetLevelTextColor(level);
-            collectionDetailLevelText.text = level + "강 도감 기록";
-            collectionDetailPanel.SetActive(true);
-            collectionPreview.Show(stage);
-        }
-
-        private void CloseCollectionDetail()
-        {
+            collectionTransitioning = false;
             if (collectionPreview != null)
             {
                 collectionPreview.Hide();
             }
 
-            if (collectionDetailPanel != null)
+            if (collectionPanel != null)
             {
-                collectionDetailPanel.SetActive(false);
+                collectionPanel.SetActive(false);
+            }
+        }
+
+        private void NavigateCollection(int direction)
+        {
+            if (collectionTransitioning ||
+                collectionPreview == null ||
+                balanceRef == null)
+            {
+                return;
+            }
+
+            int targetLevel = Mathf.Clamp(
+                collectionCurrentLevel + (direction >= 0 ? 1 : -1),
+                0,
+                collectionMaxUnlockedLevel);
+            if (targetLevel == collectionCurrentLevel)
+            {
+                return;
+            }
+
+            int lowerLevel = Mathf.Min(collectionCurrentLevel, targetLevel);
+            int upperLevel = Mathf.Max(collectionCurrentLevel, targetLevel);
+            float diameterMultiplier =
+                StarForgeCollectionPreview.GetDiameterMultiplier(
+                    lowerLevel,
+                    upperLevel);
+            float duration =
+                StarForgeCollectionPreview.GetTransitionDuration(
+                    diameterMultiplier);
+
+            collectionCurrentLevel = targetLevel;
+            collectionTransitioning = true;
+            RefreshCollectionStageText();
+            RefreshCollectionNavigationState();
+            collectionPreview.TransitionTo(
+                targetLevel,
+                duration,
+                OnCollectionTransitionComplete);
+            if (collectionSkipEnabled)
+            {
+                collectionPreview.CompleteTransitionImmediately();
+            }
+        }
+
+        private void SkipCollectionTransition()
+        {
+            if (!collectionTransitioning || collectionPreview == null)
+            {
+                return;
+            }
+
+            if (!collectionPreview.CompleteTransitionImmediately())
+            {
+                collectionTransitioning = false;
+                RefreshCollectionNavigationState();
+            }
+        }
+
+        private void OnCollectionSkipToggleChanged(bool enabled)
+        {
+            collectionSkipEnabled = enabled;
+            RefreshCollectionSkipToggle();
+            if (collectionSkipEnabled && collectionTransitioning)
+            {
+                SkipCollectionTransition();
+            }
+        }
+
+        private void SelectCollectionShape(StarForgePlanetShape shape)
+        {
+            if (!IsCollectionShapeDiscovered(shape))
+            {
+                RefreshCollectionShapeButtons();
+                return;
+            }
+
+            if (collectionTransitioning)
+            {
+                SkipCollectionTransition();
+            }
+
+            if (collectionShape == shape)
+            {
+                RefreshCollectionShapeButtons();
+                return;
+            }
+
+            collectionShape = shape;
+            collectionMaxUnlockedLevel =
+                GetCollectionShapeMaxLevel(collectionShape);
+            collectionCurrentLevel = Mathf.Clamp(
+                collectionCurrentLevel,
+                0,
+                collectionMaxUnlockedLevel);
+            ShowCurrentCollectionStage();
+        }
+
+        private void OnCollectionTransitionComplete()
+        {
+            collectionTransitioning = false;
+            RefreshCollectionNavigationState();
+        }
+
+        private void ShowCurrentCollectionStage()
+        {
+            RefreshCollectionStageText();
+            RefreshCollectionNavigationState();
+            Canvas.ForceUpdateCanvases();
+            Rect viewportRect = collectionPlanetImage.rectTransform.rect;
+            collectionPreview.SetViewportSize(
+                viewportRect.width,
+                viewportRect.height);
+            collectionPlanetImage.texture = collectionPreview.OutputTexture;
+            collectionPreview.Show(
+                balanceRef,
+                collectionMaxUnlockedLevel,
+                collectionCurrentLevel,
+                collectionShape);
+        }
+
+        private void RefreshCollectionStageText()
+        {
+            if (balanceRef == null || collectionTitleText == null)
+            {
+                return;
+            }
+
+            StageVisualConfig stage = balanceRef.GetStage(collectionCurrentLevel);
+            collectionTitleText.text =
+                collectionCurrentLevel + "강 : " +
+                balanceRef.GetStageName(collectionCurrentLevel, collectionShape);
+            collectionTitleText.color = GetLevelTextColor(collectionCurrentLevel);
+        }
+
+        private void RefreshCollectionNavigationState()
+        {
+            if (collectionPreviousButton != null)
+            {
+                collectionPreviousButton.interactable =
+                    !collectionTransitioning && collectionCurrentLevel > 0;
+            }
+
+            if (collectionNextButton != null)
+            {
+                collectionNextButton.interactable =
+                    !collectionTransitioning &&
+                    collectionCurrentLevel < collectionMaxUnlockedLevel;
+            }
+
+            RefreshCollectionSkipToggle();
+            RefreshCollectionShapeButtons();
+        }
+
+        private void RefreshCollectionSkipToggle()
+        {
+            if (collectionSkipToggle == null)
+            {
+                return;
+            }
+
+            Image background = collectionSkipToggle.targetGraphic as Image;
+            Graphic checkmark = collectionSkipToggle.graphic;
+            Color accent = collectionSkipEnabled
+                ? new Color(0.38f, 0.94f, 1f, 1f)
+                : new Color(0.36f, 0.3f, 0.5f, 1f);
+
+            if (background != null)
+            {
+                background.color = collectionSkipEnabled
+                    ? new Color(0.04f, 0.22f, 0.3f, 0.96f)
+                    : new Color(0.025f, 0.035f, 0.075f, 0.94f);
+            }
+
+            if (checkmark != null)
+            {
+                checkmark.color = accent;
+            }
+        }
+
+        private void RefreshCollectionShapeButtons()
+        {
+            for (int i = 0; i < collectionShapeButtons.Length; i++)
+            {
+                Button button = collectionShapeButtons[i];
+                if (button == null)
+                {
+                    continue;
+                }
+
+                bool selected = (int)collectionShape == i;
+                bool discovered = collectionShapeDiscovered[i];
+                button.interactable =
+                    !collectionTransitioning && discovered;
+                Color accent = selected
+                    ? new Color(0.88f, 0.42f, 1f, 1f)
+                    : discovered
+                        ? new Color(0.18f, 0.48f, 0.78f, 1f)
+                        : new Color(0.2f, 0.23f, 0.3f, 1f);
+                ApplyCollectionButtonPalette(button, accent, selected);
+
+                Text label = collectionShapeButtonTexts[i];
+                if (label != null)
+                {
+                    label.text = discovered
+                        ? GetCollectionShapeLabel(
+                            (StarForgePlanetShape)i)
+                        : string.Empty;
+                    label.color = selected
+                        ? new Color(1f, 0.86f, 1f, 1f)
+                        : discovered
+                            ? new Color(0.58f, 0.7f, 0.84f, 1f)
+                            : new Color(0.5f, 0.54f, 0.62f, 1f);
+                    label.fontStyle = selected ? FontStyle.Bold : FontStyle.Normal;
+                }
+
+                if (collectionShapeLockIcons[i] != null)
+                {
+                    collectionShapeLockIcons[i].SetActive(!discovered);
+                }
             }
         }
 
@@ -1724,53 +2445,310 @@ namespace StarForge.Presentation
                 collectionOpenButton.interactable = !isBusy;
             }
 
-            if (collectionCards == null || collectionProgressText == null)
+            int previousMaxLevel = collectionMaxUnlockedLevel;
+            for (int i = 0; i < collectionShapeButtons.Length; i++)
+            {
+                StarForgePlanetShape shape = (StarForgePlanetShape)i;
+                collectionShapeDiscovered[i] =
+                    saveData.IsShapeDiscovered(shape);
+                collectionShapeMaxLevels[i] = collectionShapeDiscovered[i]
+                    ? Mathf.Clamp(
+                        saveData.GetShapeHighestLevel(shape),
+                        0,
+                        balance.maxLevel)
+                    : -1;
+            }
+
+            if (!IsCollectionShapeDiscovered(collectionShape))
+            {
+                collectionShape = StarForgePlanetShape.Default;
+            }
+
+            collectionMaxUnlockedLevel =
+                GetCollectionShapeMaxLevel(collectionShape);
+
+            if (collectionPanel == null || !collectionPanel.activeSelf)
             {
                 return;
             }
 
-            int highestLevel = Mathf.Clamp(saveData.highestLevel, 0, balance.maxLevel);
-            collectionProgressText.text =
-                "발견 " +
-                (highestLevel + 1) +
-                " / " +
-                (balance.maxLevel + 1);
-
-            for (int i = 0; i < collectionCards.Length; i++)
+            if (!collectionTransitioning &&
+                collectionCurrentLevel > collectionMaxUnlockedLevel)
             {
-                CollectionCard card = collectionCards[i];
-                StageVisualConfig stage = balance.GetStage(card.level);
-                bool unlocked = card.level <= highestLevel;
-
-                card.button.interactable = unlocked && !isBusy;
-                card.levelText.text = card.level + "강";
-                card.levelText.color = unlocked
-                    ? GetLevelTextColor(card.level)
-                    : new Color(0.42f, 0.48f, 0.56f, 1f);
-                card.nameText.text = unlocked ? stage.displayName : "미발견";
-                card.nameText.color = unlocked
-                    ? new Color(0.8f, 0.94f, 1f, 1f)
-                    : new Color(0.32f, 0.36f, 0.42f, 1f);
-
-                if (unlocked)
-                {
-                    Color stageColor;
-                    if (!ColorUtility.TryParseHtmlString(stage.color, out stageColor))
-                    {
-                        stageColor = Color.white;
-                    }
-
-                    StarForgePlanetSurface surface =
-                        StarForgePlanetTextureFactory.Get(card.level, stageColor);
-                    card.planetImage.texture = surface.baseMap;
-                    card.planetImage.color = Color.white;
-                }
-                else
-                {
-                    card.planetImage.texture = Texture2D.whiteTexture;
-                    card.planetImage.color = new Color(0.005f, 0.007f, 0.012f, 1f);
-                }
+                collectionCurrentLevel = collectionMaxUnlockedLevel;
+                ShowCurrentCollectionStage();
+                return;
             }
+
+            if (!collectionTransitioning &&
+                previousMaxLevel != collectionMaxUnlockedLevel)
+            {
+                ShowCurrentCollectionStage();
+                return;
+            }
+
+            RefreshCollectionStageText();
+            RefreshCollectionNavigationState();
+        }
+
+        private bool IsCollectionShapeDiscovered(
+            StarForgePlanetShape shape)
+        {
+            int index = (int)shape;
+            return index >= 0 &&
+                   index < collectionShapeDiscovered.Length &&
+                   collectionShapeDiscovered[index];
+        }
+
+        private int GetCollectionShapeMaxLevel(
+            StarForgePlanetShape shape)
+        {
+            int index = (int)shape;
+            return index >= 0 &&
+                   index < collectionShapeMaxLevels.Length
+                ? Mathf.Max(0, collectionShapeMaxLevels[index])
+                : 0;
+        }
+
+        private static string GetCollectionShapeLabel(
+            StarForgePlanetShape shape)
+        {
+            switch (shape)
+            {
+                case StarForgePlanetShape.Heart:
+                    return "하트별";
+                case StarForgePlanetShape.Cat:
+                    return "고양이별";
+                default:
+                    return "일반 별";
+            }
+        }
+
+        private GameObject CreateCollectionLockIcon(Transform parent)
+        {
+            GameObject root = new GameObject(
+                "Lock Icon",
+                typeof(RectTransform),
+                typeof(Image));
+            root.transform.SetParent(parent, false);
+            RectTransform rootRect = root.GetComponent<RectTransform>();
+            rootRect.anchorMin = new Vector2(0.5f, 0.5f);
+            rootRect.anchorMax = new Vector2(0.5f, 0.5f);
+            rootRect.pivot = new Vector2(0.5f, 0.5f);
+            rootRect.sizeDelta = new Vector2(52f, 52f);
+            rootRect.anchoredPosition = Vector2.zero;
+
+            Image image = root.GetComponent<Image>();
+            image.sprite = LoadCollectionLockSprite();
+            image.type = Image.Type.Simple;
+            image.preserveAspect = true;
+            image.color = Color.white;
+            image.raycastTarget = false;
+            root.SetActive(false);
+            return root;
+        }
+
+        private static Sprite LoadCollectionLockSprite()
+        {
+            Sprite sprite = Resources.Load<Sprite>("CollectionLock");
+            if (sprite != null)
+            {
+                return sprite;
+            }
+
+            Texture2D texture = Resources.Load<Texture2D>("CollectionLock");
+            return texture != null
+                ? Sprite.Create(
+                    texture,
+                    new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(0.5f, 0.5f),
+                    100f)
+                : null;
+        }
+
+        private Toggle CreateCollectionSkipToggle(Transform parent)
+        {
+            GameObject toggleObject = new GameObject(
+                "Collection Skip Toggle",
+                typeof(RectTransform),
+                typeof(Toggle));
+            toggleObject.transform.SetParent(parent, false);
+
+            GameObject backgroundObject = new GameObject(
+                "Background",
+                typeof(RectTransform),
+                typeof(Image));
+            backgroundObject.transform.SetParent(toggleObject.transform, false);
+            RectTransform backgroundRect =
+                backgroundObject.GetComponent<RectTransform>();
+            backgroundRect.anchorMin = Vector2.zero;
+            backgroundRect.anchorMax = Vector2.one;
+            backgroundRect.offsetMin = Vector2.zero;
+            backgroundRect.offsetMax = Vector2.zero;
+            Image background = backgroundObject.GetComponent<Image>();
+            background.color = new Color(0.025f, 0.035f, 0.075f, 0.94f);
+            Image toggleTarget = ApplyCanvasFrame(
+                backgroundObject,
+                background.color,
+                new Color(0.2f, 0.52f, 0.88f, 0.95f),
+                2f);
+
+            GameObject checkboxObject = new GameObject(
+                "Checkbox",
+                typeof(RectTransform),
+                typeof(Image));
+            checkboxObject.transform.SetParent(backgroundObject.transform, false);
+            RectTransform checkboxRect =
+                checkboxObject.GetComponent<RectTransform>();
+            checkboxRect.anchorMin = new Vector2(0.8f, 0.5f);
+            checkboxRect.anchorMax = new Vector2(0.8f, 0.5f);
+            checkboxRect.pivot = new Vector2(0.5f, 0.5f);
+            checkboxRect.sizeDelta = new Vector2(34f, 34f);
+            checkboxRect.anchoredPosition = Vector2.zero;
+            Image checkbox = checkboxObject.GetComponent<Image>();
+            checkbox.sprite = null;
+            checkbox.type = Image.Type.Simple;
+            checkbox.color = new Color(0.008f, 0.025f, 0.055f, 0.96f);
+            checkbox.raycastTarget = false;
+            AddFourSideBorder(
+                checkboxObject,
+                new Color(0.38f, 0.94f, 1f, 1f),
+                2f);
+
+            Text label = CreateText(
+                "스킵",
+                15,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                toggleObject.transform);
+            RectTransform labelRect = label.GetComponent<RectTransform>();
+            labelRect.anchorMin = new Vector2(0.08f, 0f);
+            labelRect.anchorMax = new Vector2(0.62f, 1f);
+            labelRect.offsetMin = Vector2.zero;
+            labelRect.offsetMax = Vector2.zero;
+            label.color = new Color(0.78f, 0.88f, 1f, 1f);
+
+            collectionSkipToggleText = CreateText(
+                "V",
+                22,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                checkboxObject.transform);
+            RectTransform checkmarkRect =
+                collectionSkipToggleText.GetComponent<RectTransform>();
+            StretchRect(checkmarkRect, Vector2.zero);
+            collectionSkipToggleText.color =
+                new Color(0.38f, 0.94f, 1f, 1f);
+            collectionSkipToggleText.raycastTarget = false;
+
+            Toggle toggle = toggleObject.GetComponent<Toggle>();
+            toggle.targetGraphic = toggleTarget;
+            toggle.graphic = collectionSkipToggleText;
+            ColorBlock colors = toggle.colors;
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(0.78f, 0.9f, 1f, 1f);
+            colors.pressedColor = new Color(0.58f, 0.72f, 0.9f, 1f);
+            colors.disabledColor = new Color(0.4f, 0.4f, 0.48f, 0.6f);
+            toggle.colors = colors;
+            return toggle;
+        }
+
+        private static void StyleCollectionSpaceButton(
+            Button button,
+            Color accent)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            ApplyCollectionButtonPalette(button, accent, false);
+            Text label = button.GetComponentInChildren<Text>();
+            if (label == null)
+            {
+                return;
+            }
+
+            Outline glow = label.GetComponent<Outline>();
+            if (glow == null)
+            {
+                glow = label.gameObject.AddComponent<Outline>();
+            }
+
+            glow.effectColor = new Color(
+                accent.r * 0.35f,
+                accent.g * 0.35f,
+                accent.b * 0.45f,
+                0.95f);
+            glow.effectDistance = new Vector2(1.5f, -1.5f);
+            glow.useGraphicAlpha = true;
+        }
+
+        private static void ApplyCollectionButtonPalette(
+            Button button,
+            Color accent,
+            bool selected)
+        {
+            Image image = button.image;
+            Color normal = selected
+                ? new Color(
+                    accent.r * 0.24f,
+                    accent.g * 0.2f,
+                    accent.b * 0.3f,
+                    0.98f)
+                : new Color(0.018f, 0.032f, 0.075f, 0.94f);
+            image.color = normal;
+            image.raycastTarget = true;
+
+            ColorBlock colors = button.colors;
+            colors.normalColor = normal;
+            colors.highlightedColor = new Color(
+                Mathf.Clamp01(normal.r + accent.r * 0.2f),
+                Mathf.Clamp01(normal.g + accent.g * 0.2f),
+                Mathf.Clamp01(normal.b + accent.b * 0.2f),
+                1f);
+            colors.pressedColor = new Color(
+                normal.r * 0.62f,
+                normal.g * 0.62f,
+                normal.b * 0.72f,
+                1f);
+            colors.selectedColor = colors.highlightedColor;
+            colors.disabledColor = new Color(0.012f, 0.018f, 0.04f, 0.58f);
+            colors.colorMultiplier = 1f;
+            button.colors = colors;
+
+            AddPanelOutline(
+                button.gameObject,
+                new Color(accent.r, accent.g, accent.b, selected ? 1f : 0.72f),
+                new Vector2(selected ? 2.5f : 1.5f, selected ? -2.5f : -1.5f));
+        }
+
+        private static void StyleCollectionArrowButton(Button button)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            Color accent = new Color(0.26f, 0.76f, 1f, 1f);
+            StyleCollectionSpaceButton(button, accent);
+
+            Text arrow = button.GetComponentInChildren<Text>();
+            if (arrow == null)
+            {
+                return;
+            }
+
+            arrow.color = Color.white;
+            Outline outline = arrow.GetComponent<Outline>();
+            if (outline == null)
+            {
+                outline = arrow.gameObject.AddComponent<Outline>();
+            }
+
+            outline.effectColor = new Color(0.02f, 0.24f, 0.48f, 0.95f);
+            outline.effectDistance = new Vector2(2.5f, -2.5f);
+            outline.useGraphicAlpha = true;
         }
 
         public void ShowReviveOverlay(StarForgeEnhancementResult result, StarForgeSaveData saveData)
@@ -1782,57 +2760,84 @@ namespace StarForge.Presentation
 
             reviveDestroyedLevel = result.previousLevel;
             reviveBodyText.text =
-                result.previousLevel + "강에서 행성이 소멸했습니다.\n" +
-                "회수 보상: " + StarForgeFormat.CurrencyList(result.rewards);
+                "<color=#F3F8FF>" + result.previousLevel + "강에서 행성이 소멸했습니다.</color>\n" +
+                "<size=25><color=#FFB664>회수 보상  " +
+                StarForgeFormat.CurrencyList(result.rewards) +
+                "</color></size>";
             RefreshReviveRows(saveData);
+            SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
             revivePanel.SetActive(true);
         }
 
-        private void SetBottomHudVisible(bool visible)
+        public void HideReviveOverlay()
         {
-            if (bottomHudCanvasGroup == null || bottomHudVisible == visible)
+            if (revivePanel != null)
+            {
+                revivePanel.SetActive(false);
+            }
+        }
+
+        public void SetRewardedReviveButtonState(
+            bool interactable,
+            string label)
+        {
+            if (rewardedReviveButton != null)
+            {
+                rewardedReviveButton.interactable = interactable;
+            }
+
+            if (rewardedReviveButtonText != null &&
+                !string.IsNullOrEmpty(label))
+            {
+                rewardedReviveButtonText.text = label;
+            }
+        }
+
+        private void SetMainHudVisible(bool visible)
+        {
+            if (mainHudCanvasGroup == null || mainHudVisible == visible)
             {
                 return;
             }
 
-            bottomHudVisible = visible;
+            mainHudVisible = visible;
 
-            if (bottomHudFadeRoutine != null)
+            if (mainHudFadeRoutine != null)
             {
-                StopCoroutine(bottomHudFadeRoutine);
-                bottomHudFadeRoutine = null;
+                StopCoroutine(mainHudFadeRoutine);
+                mainHudFadeRoutine = null;
             }
 
             if (!gameObject.activeInHierarchy)
             {
-                bottomHudCanvasGroup.alpha = visible ? 1f : 0f;
-                bottomHudCanvasGroup.interactable = visible;
-                bottomHudCanvasGroup.blocksRaycasts = visible;
+                mainHudCanvasGroup.alpha = visible ? 1f : 0f;
+                mainHudCanvasGroup.interactable = visible;
+                mainHudCanvasGroup.blocksRaycasts = visible;
                 return;
             }
 
-            bottomHudFadeRoutine = StartCoroutine(FadeBottomHud(visible));
+            mainHudFadeRoutine = StartCoroutine(FadeMainHud(visible));
         }
 
-        private IEnumerator FadeBottomHud(bool visible)
+        private IEnumerator FadeMainHud(bool visible)
         {
-            bottomHudCanvasGroup.interactable = visible;
-            bottomHudCanvasGroup.blocksRaycasts = visible;
+            mainHudCanvasGroup.interactable = visible;
+            mainHudCanvasGroup.blocksRaycasts = visible;
 
-            float from = bottomHudCanvasGroup.alpha;
+            float from = mainHudCanvasGroup.alpha;
             float to = visible ? 1f : 0f;
             float duration = visible ? 0.28f : 0.14f;
             float elapsed = 0f;
 
             while (elapsed < duration)
             {
-                bottomHudCanvasGroup.alpha = Mathf.Lerp(from, to, elapsed / duration);
+                mainHudCanvasGroup.alpha = Mathf.Lerp(from, to, elapsed / duration);
                 elapsed += Time.deltaTime;
                 yield return null;
             }
 
-            bottomHudCanvasGroup.alpha = to;
-            bottomHudFadeRoutine = null;
+            mainHudCanvasGroup.alpha = to;
+            mainHudFadeRoutine = null;
         }
 
         public void ShowMessage(string title, string body)
@@ -1843,55 +2848,118 @@ namespace StarForge.Presentation
             }
 
             resultPanel.SetActive(true);
+            SetResultRewards(null);
             resultTitleText.text = title;
             resultBodyText.text = body;
         }
 
+        private void SetResultRewards(CurrencyAmount[] rewards)
+        {
+            if (resultRewardRow == null)
+            {
+                return;
+            }
+
+            int rewardCount = rewards != null
+                ? Mathf.Min(rewards.Length, resultRewardIcons.Length)
+                : 0;
+            resultRewardRow.SetActive(rewardCount > 0);
+            for (int i = 0; i < resultRewardIcons.Length; i++)
+            {
+                Image icon = resultRewardIcons[i];
+                Text amount = resultRewardTexts[i];
+                GameObject slot = icon != null
+                    ? icon.transform.parent.gameObject
+                    : null;
+                bool visible =
+                    i < rewardCount &&
+                    rewards[i] != null &&
+                    rewards[i].amount > 0;
+                if (slot != null)
+                {
+                    slot.SetActive(visible);
+                }
+
+                if (!visible)
+                {
+                    continue;
+                }
+
+                icon.sprite = GetMaterialIcon((int)rewards[i].type);
+                icon.color = Color.white;
+                amount.text =
+                    "+" + StarForgeFormat.Number(rewards[i].amount);
+            }
+        }
+
         private void BuildRevivePanel(RectTransform root, StarForgeBalance balance)
         {
-            revivePanel = CreatePanel("Revive Overlay", root, new Color(0.005f, 0.008f, 0.02f, 0.95f));
+            revivePanel = CreatePanel("Revive Overlay", root, new Color(0.003f, 0.006f, 0.018f, 0.88f));
             RectTransform overlayRect = revivePanel.GetComponent<RectTransform>();
             overlayRect.anchorMin = Vector2.zero;
             overlayRect.anchorMax = Vector2.one;
             overlayRect.offsetMin = Vector2.zero;
             overlayRect.offsetMax = Vector2.zero;
 
-            GameObject dialog = CreatePanel("Revive Popup", revivePanel.transform, new Color(0.035f, 0.025f, 0.05f, 0.99f));
+            GameObject dialog = CreatePanel(
+                "Revive Popup",
+                revivePanel.transform,
+                new Color(0.018f, 0.025f, 0.052f, 0.99f));
             RectTransform dialogRect = dialog.GetComponent<RectTransform>();
-            dialogRect.anchorMin = new Vector2(0.05f, 0.08f);
-            dialogRect.anchorMax = new Vector2(0.95f, 0.92f);
+            dialogRect.anchorMin = new Vector2(0.055f, 0.305f);
+            dialogRect.anchorMax = new Vector2(0.945f, 0.975f);
             dialogRect.offsetMin = Vector2.zero;
             dialogRect.offsetMax = Vector2.zero;
-            AddPanelOutline(dialog, new Color(0.52f, 0.16f, 0.22f, 0.95f), new Vector2(2f, -2f));
+            ApplyCanvasFrame(
+                dialog,
+                new Color(0.012f, 0.022f, 0.048f, 0.995f),
+                new Color(0.72f, 0.16f, 0.24f, 0.98f),
+                2f);
 
             VerticalLayoutGroup layout = dialog.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(14, 14, 14, 14);
-            layout.spacing = 8f;
+            layout.padding = new RectOffset(16, 16, 14, 14);
+            layout.spacing = 6f;
             layout.childControlWidth = true;
             layout.childControlHeight = true;
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
-            layout.childAlignment = TextAnchor.UpperCenter;
+            layout.childAlignment = TextAnchor.MiddleCenter;
 
-            Text title = CreateText("행성 소멸", 36, FontStyle.Bold, TextAnchor.MiddleCenter, dialog.transform);
+            GameObject header = CreatePanel(
+                "Revive Header",
+                dialog.transform,
+                new Color(0.04f, 0.02f, 0.045f, 0.99f));
+            ApplyCanvasFrame(
+                header,
+                new Color(0.028f, 0.022f, 0.052f, 0.99f),
+                new Color(0.8f, 0.2f, 0.26f, 0.96f),
+                2f);
+            LayoutElement headerElement = header.AddComponent<LayoutElement>();
+            headerElement.minHeight = 126f;
+            headerElement.preferredHeight = 126f;
+
+            VerticalLayoutGroup headerLayout = header.AddComponent<VerticalLayoutGroup>();
+            headerLayout.padding = new RectOffset(14, 14, 8, 8);
+            headerLayout.spacing = 1f;
+            headerLayout.childControlWidth = true;
+            headerLayout.childControlHeight = true;
+            headerLayout.childForceExpandWidth = true;
+            headerLayout.childForceExpandHeight = false;
+            headerLayout.childAlignment = TextAnchor.MiddleCenter;
+
+            Text title = CreateText("행성 소멸", 36, FontStyle.Bold, TextAnchor.MiddleCenter, header.transform);
             title.color = new Color(1f, 0.45f, 0.42f, 1f);
-            SetPreferredHeight(title, 48f);
+            SetPreferredHeight(title, 43f);
+            Outline titleGlow = title.gameObject.AddComponent<Outline>();
+            titleGlow.effectColor = new Color(0.42f, 0.02f, 0.06f, 0.92f);
+            titleGlow.effectDistance = new Vector2(2f, -2f);
 
-            reviveBodyText = CreateText("", 19, FontStyle.Bold, TextAnchor.MiddleCenter, dialog.transform);
+            reviveBodyText = CreateText("", 22, FontStyle.Bold, TextAnchor.MiddleCenter, header.transform);
             reviveBodyText.color = new Color(0.85f, 0.9f, 1f, 1f);
             reviveBodyText.resizeTextForBestFit = true;
-            reviveBodyText.resizeTextMinSize = 13;
-            reviveBodyText.resizeTextMaxSize = 19;
-            SetPreferredHeight(reviveBodyText, 58f);
-
-            Text guide = CreateText(
-                "재화를 지불하면 세이브포인트에서 다시 시작할 수 있습니다.",
-                16,
-                FontStyle.Normal,
-                TextAnchor.MiddleCenter,
-                dialog.transform);
-            guide.color = new Color(0.6f, 0.68f, 0.8f, 1f);
-            SetPreferredHeight(guide, 26f);
+            reviveBodyText.resizeTextMinSize = 17;
+            reviveBodyText.resizeTextMaxSize = 25;
+            SetPreferredHeight(reviveBodyText, 68f);
 
             RevivePointConfig[] points = balance.revivePoints != null
                 ? balance.revivePoints
@@ -1905,9 +2973,53 @@ namespace StarForge.Presentation
             }
 
             Button restartButton = CreateButton("0강부터 다시 시작", 24, dialog.transform);
-            restartButton.GetComponent<LayoutElement>().preferredHeight = 62f;
-            restartButton.image.color = new Color(0.12f, 0.16f, 0.26f, 1f);
+            LayoutElement restartLayout = restartButton.GetComponent<LayoutElement>();
+            restartLayout.minHeight = 58f;
+            restartLayout.preferredHeight = 58f;
+            ApplyCanvasFrame(
+                restartButton.gameObject,
+                new Color(0.11f, 0.025f, 0.045f, 0.98f),
+                new Color(0.72f, 0.14f, 0.2f, 0.98f),
+                2f);
+            ColorBlock restartColors = restartButton.colors;
+            restartColors.normalColor = Color.white;
+            restartColors.highlightedColor = new Color(1f, 0.86f, 0.88f, 1f);
+            restartColors.pressedColor = new Color(0.72f, 0.62f, 0.64f, 1f);
+            restartColors.selectedColor = restartColors.highlightedColor;
+            restartButton.colors = restartColors;
+            SetButtonTextColor(restartButton, new Color(1f, 0.84f, 0.82f, 1f));
             restartButton.onClick.AddListener(() => revivePanel.SetActive(false));
+
+            rewardedReviveButton = CreateButton(
+                "광고 보고 현 단계 유지",
+                22,
+                dialog.transform);
+            rewardedReviveButtonText =
+                rewardedReviveButton.GetComponentInChildren<Text>();
+            LayoutElement rewardedLayout =
+                rewardedReviveButton.GetComponent<LayoutElement>();
+            rewardedLayout.minHeight = 75f;
+            rewardedLayout.preferredHeight = 75f;
+            ApplyCanvasFrame(
+                rewardedReviveButton.gameObject,
+                new Color(0.12f, 0.08f, 0.018f, 0.99f),
+                new Color(1f, 0.66f, 0.16f, 0.98f),
+                2.5f);
+            ColorBlock rewardedColors = rewardedReviveButton.colors;
+            rewardedColors.normalColor = Color.white;
+            rewardedColors.highlightedColor =
+                new Color(1f, 0.94f, 0.72f, 1f);
+            rewardedColors.pressedColor =
+                new Color(0.76f, 0.68f, 0.48f, 1f);
+            rewardedColors.selectedColor = rewardedColors.highlightedColor;
+            rewardedColors.disabledColor =
+                new Color(0.42f, 0.42f, 0.42f, 0.72f);
+            rewardedReviveButton.colors = rewardedColors;
+            SetButtonTextColor(
+                rewardedReviveButton,
+                new Color(1f, 0.88f, 0.5f, 1f));
+            rewardedReviveButton.onClick.AddListener(
+                () => RewardedReviveRequested?.Invoke());
 
             revivePanel.SetActive(false);
         }
@@ -1920,15 +3032,25 @@ namespace StarForge.Presentation
             GameObject container = CreatePanel(
                 "Revive Row " + config.level,
                 parent,
-                new Color(0.05f, 0.055f, 0.105f, 0.98f));
-            AddPanelOutline(container, new Color(0.2f, 0.3f, 0.5f, 0.85f), new Vector2(1.5f, -1.5f));
+                new Color(0.04f, 0.065f, 0.12f, 0.98f));
+            row.accentColor = GetLevelTextColor(config.level);
+            row.frameImage = container.GetComponent<Image>();
+            row.fillImage = ApplyCanvasFrame(
+                container,
+                new Color(0.018f, 0.035f, 0.075f, 0.99f),
+                new Color(
+                    row.accentColor.r * 0.72f,
+                    row.accentColor.g * 0.72f,
+                    row.accentColor.b * 0.82f,
+                    0.94f),
+                2f);
             LayoutElement containerLayout = container.AddComponent<LayoutElement>();
-            containerLayout.minHeight = 104f;
-            containerLayout.preferredHeight = 104f;
+            containerLayout.minHeight = 88f;
+            containerLayout.preferredHeight = 88f;
 
             VerticalLayoutGroup containerLayoutGroup = container.AddComponent<VerticalLayoutGroup>();
-            containerLayoutGroup.padding = new RectOffset(10, 10, 6, 6);
-            containerLayoutGroup.spacing = 2f;
+            containerLayoutGroup.padding = new RectOffset(13, 13, 7, 6);
+            containerLayoutGroup.spacing = 3f;
             containerLayoutGroup.childControlWidth = true;
             containerLayoutGroup.childControlHeight = true;
             containerLayoutGroup.childForceExpandWidth = true;
@@ -1936,7 +3058,7 @@ namespace StarForge.Presentation
 
             GameObject titleLine = new GameObject("Title Line", typeof(RectTransform), typeof(LayoutElement));
             titleLine.transform.SetParent(container.transform, false);
-            titleLine.GetComponent<LayoutElement>().preferredHeight = 50f;
+            titleLine.GetComponent<LayoutElement>().preferredHeight = 44f;
             HorizontalLayoutGroup titleLayout = titleLine.AddComponent<HorizontalLayoutGroup>();
             titleLayout.spacing = 8f;
             titleLayout.childAlignment = TextAnchor.MiddleLeft;
@@ -1948,27 +3070,40 @@ namespace StarForge.Presentation
             StageVisualConfig stage = balance.GetStage(config.level);
             row.titleText = CreateText(
                 config.level + "강 부활 · " + stage.displayName,
-                21,
+                20,
                 FontStyle.Bold,
                 TextAnchor.MiddleLeft,
                 titleLine.transform);
             LayoutElement titleTextLayout = row.titleText.GetComponent<LayoutElement>();
             titleTextLayout.flexibleWidth = 1f;
+            Outline titleOutline = row.titleText.gameObject.AddComponent<Outline>();
+            titleOutline.effectColor = new Color(
+                row.accentColor.r * 0.12f,
+                row.accentColor.g * 0.12f,
+                row.accentColor.b * 0.16f,
+                0.9f);
+            titleOutline.effectDistance = new Vector2(1.25f, -1.25f);
 
-            row.button = CreateButton("부활", 20, titleLine.transform);
+            row.button = CreateButton("부활", 18, titleLine.transform);
             LayoutElement buttonLayout = row.button.GetComponent<LayoutElement>();
-            buttonLayout.minWidth = 96f;
-            buttonLayout.preferredWidth = 96f;
-            buttonLayout.minHeight = 46f;
-            buttonLayout.preferredHeight = 46f;
+            buttonLayout.minWidth = 104f;
+            buttonLayout.preferredWidth = 104f;
+            buttonLayout.minHeight = 40f;
+            buttonLayout.preferredHeight = 40f;
             buttonLayout.flexibleWidth = 0f;
-            row.button.image.color = new Color(0.1f, 0.32f, 0.2f, 1f);
+            row.buttonFill = ApplyCanvasFrame(
+                row.button.gameObject,
+                new Color(0.035f, 0.18f, 0.13f, 0.98f),
+                new Color(0.2f, 0.82f, 0.5f, 0.96f),
+                2f);
             ColorBlock buttonColors = row.button.colors;
-            buttonColors.normalColor = new Color(0.1f, 0.32f, 0.2f, 1f);
-            buttonColors.highlightedColor = new Color(0.16f, 0.46f, 0.3f, 1f);
-            buttonColors.pressedColor = new Color(0.06f, 0.2f, 0.13f, 1f);
-            buttonColors.disabledColor = new Color(0.06f, 0.09f, 0.08f, 0.85f);
+            buttonColors.normalColor = Color.white;
+            buttonColors.highlightedColor = new Color(0.88f, 1f, 0.94f, 1f);
+            buttonColors.pressedColor = new Color(0.62f, 0.75f, 0.68f, 1f);
+            buttonColors.selectedColor = buttonColors.highlightedColor;
+            buttonColors.disabledColor = new Color(0.44f, 0.48f, 0.54f, 0.72f);
             row.button.colors = buttonColors;
+            SetButtonTextColor(row.button, new Color(0.82f, 1f, 0.9f, 1f));
 
             int capturedLevel = config.level;
             row.button.onClick.AddListener(() =>
@@ -1979,7 +3114,7 @@ namespace StarForge.Presentation
 
             GameObject costLine = new GameObject("Cost Line", typeof(RectTransform), typeof(LayoutElement));
             costLine.transform.SetParent(container.transform, false);
-            costLine.GetComponent<LayoutElement>().preferredHeight = 36f;
+            costLine.GetComponent<LayoutElement>().preferredHeight = 34f;
             HorizontalLayoutGroup costLayout = costLine.AddComponent<HorizontalLayoutGroup>();
             costLayout.spacing = 6f;
             costLayout.childAlignment = TextAnchor.MiddleLeft;
@@ -2012,25 +3147,25 @@ namespace StarForge.Presentation
                     typeof(LayoutElement));
                 iconObject.transform.SetParent(costLine.transform, false);
                 LayoutElement iconLayout = iconObject.GetComponent<LayoutElement>();
-                iconLayout.minWidth = 32f;
-                iconLayout.preferredWidth = 32f;
-                iconLayout.minHeight = 32f;
-                iconLayout.preferredHeight = 32f;
+                iconLayout.minWidth = 30f;
+                iconLayout.preferredWidth = 30f;
+                iconLayout.minHeight = 30f;
+                iconLayout.preferredHeight = 30f;
                 row.costIcons[i] = iconObject.GetComponent<Image>();
                 row.costIcons[i].sprite = GetMaterialIcon((int)cost.type);
                 row.costIcons[i].preserveAspect = true;
 
                 row.costTexts[i] = CreateText(
                     "x" + StarForgeFormat.Number(cost.amount),
-                    18,
+                    17,
                     FontStyle.Bold,
                     TextAnchor.MiddleLeft,
                     costLine.transform);
                 LayoutElement costTextLayout = row.costTexts[i].GetComponent<LayoutElement>();
-                costTextLayout.minWidth = 64f;
+                costTextLayout.minWidth = 58f;
             }
 
-            row.statusText = CreateText("", 15, FontStyle.Bold, TextAnchor.MiddleRight, costLine.transform);
+            row.statusText = CreateText("", 14, FontStyle.Bold, TextAnchor.MiddleRight, costLine.transform);
             row.statusText.GetComponent<LayoutElement>().flexibleWidth = 1f;
 
             return row;
@@ -2079,9 +3214,49 @@ namespace StarForge.Presentation
                 }
 
                 row.titleText.color = unlocked
-                    ? new Color(0.9f, 0.96f, 1f, 1f)
+                    ? row.accentColor
                     : new Color(0.48f, 0.52f, 0.62f, 1f);
                 row.button.interactable = unlocked && affordable;
+
+                if (row.frameImage != null)
+                {
+                    row.frameImage.color = unlocked
+                        ? new Color(
+                            row.accentColor.r * 0.72f,
+                            row.accentColor.g * 0.72f,
+                            row.accentColor.b * 0.82f,
+                            0.94f)
+                        : new Color(0.16f, 0.2f, 0.3f, 0.72f);
+                }
+
+                if (row.fillImage != null)
+                {
+                    row.fillImage.color = unlocked
+                        ? new Color(0.018f, 0.035f, 0.075f, 0.99f)
+                        : new Color(0.015f, 0.022f, 0.044f, 0.96f);
+                }
+
+                if (row.buttonFill != null)
+                {
+                    row.buttonFill.color = !unlocked
+                        ? new Color(0.035f, 0.045f, 0.065f, 0.96f)
+                        : affordable
+                            ? new Color(0.035f, 0.18f, 0.13f, 0.98f)
+                            : new Color(0.18f, 0.055f, 0.075f, 0.98f);
+                }
+
+                row.button.image.color = !unlocked
+                    ? new Color(0.18f, 0.22f, 0.3f, 0.72f)
+                    : affordable
+                        ? new Color(0.2f, 0.82f, 0.5f, 0.96f)
+                        : new Color(0.82f, 0.22f, 0.28f, 0.94f);
+                SetButtonTextColor(
+                    row.button,
+                    !unlocked
+                        ? new Color(0.5f, 0.55f, 0.64f, 1f)
+                        : affordable
+                            ? new Color(0.82f, 1f, 0.9f, 1f)
+                            : new Color(1f, 0.7f, 0.72f, 1f));
                 row.statusText.text = !unlocked
                     ? row.level + "강 이상 파괴 시 가능"
                     : affordable
@@ -2103,6 +3278,10 @@ namespace StarForge.Presentation
             public Text statusText;
             public Text[] costTexts;
             public Image[] costIcons;
+            public Image frameImage;
+            public Image fillImage;
+            public Image buttonFill;
+            public Color accentColor;
             public StarForgeCurrencyType[] costTypes;
             public int[] costAmounts;
         }
@@ -2122,16 +3301,25 @@ namespace StarForge.Presentation
             buttonObject.transform.SetParent(parent, false);
 
             Image image = buttonObject.GetComponent<Image>();
-            image.color = new Color(0.12f, 0.16f, 0.24f, 0.96f);
+            Color normal = new Color(0.018f, 0.055f, 0.12f, 0.98f);
+            image.color = normal;
 
             LayoutElement layoutElement = buttonObject.GetComponent<LayoutElement>();
             layoutElement.minHeight = 44f;
 
             Button button = buttonObject.GetComponent<Button>();
+            ApplyCanvasFrame(
+                buttonObject,
+                normal,
+                new Color(0.08f, 0.36f, 0.62f, 0.96f),
+                1.5f);
+
             ColorBlock colors = button.colors;
-            colors.highlightedColor = new Color(0.2f, 0.35f, 0.52f, 1f);
-            colors.pressedColor = new Color(0.08f, 0.12f, 0.18f, 1f);
-            colors.disabledColor = new Color(0.08f, 0.08f, 0.1f, 0.7f);
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(1f, 1f, 1f, 1f);
+            colors.pressedColor = new Color(0.7f, 0.82f, 1f, 0.9f);
+            colors.selectedColor = colors.highlightedColor;
+            colors.disabledColor = new Color(0.36f, 0.4f, 0.48f, 0.7f);
             button.colors = colors;
 
             Text label = CreateText(text, fontSize, FontStyle.Bold, TextAnchor.MiddleCenter, buttonObject.transform);
@@ -2140,6 +3328,7 @@ namespace StarForge.Presentation
             labelRect.anchorMax = Vector2.one;
             labelRect.offsetMin = new Vector2(8f, 4f);
             labelRect.offsetMax = new Vector2(-8f, -4f);
+            label.raycastTarget = false;
             label.resizeTextForBestFit = true;
             label.resizeTextMinSize = 10;
             label.resizeTextMaxSize = fontSize;
@@ -2153,15 +3342,19 @@ namespace StarForge.Presentation
             buttonObject.transform.SetParent(parent, false);
 
             Image background = buttonObject.GetComponent<Image>();
-            background.color = new Color(0.035f, 0.055f, 0.105f, 1f);
-            AddPanelOutline(buttonObject, new Color(0.08f, 0.2f, 0.34f, 0.9f), new Vector2(1.5f, -1.5f));
+            background.color = new Color(0.006f, 0.025f, 0.058f, 1f);
+            ApplyCanvasFrame(
+                buttonObject,
+                background.color,
+                new Color(0.05f, 0.34f, 0.58f, 0.94f),
+                1.25f);
 
             LayoutElement layoutElement = buttonObject.GetComponent<LayoutElement>();
-            layoutElement.minHeight = 100f;
-            layoutElement.preferredHeight = 100f;
+            layoutElement.minHeight = 112f;
+            layoutElement.preferredHeight = 124f;
 
             VerticalLayoutGroup layout = buttonObject.AddComponent<VerticalLayoutGroup>();
-            layout.padding = new RectOffset(3, 3, 0, 0);
+            layout.padding = new RectOffset(3, 3, 3, 2);
             layout.spacing = 0f;
             layout.childAlignment = TextAnchor.MiddleCenter;
             layout.childControlWidth = true;
@@ -2169,80 +3362,696 @@ namespace StarForge.Presentation
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
 
+            Text label = CreateText(displayName, 17, FontStyle.Bold, TextAnchor.MiddleCenter, buttonObject.transform);
+            label.gameObject.name = "Name";
+            label.color = new Color(0.82f, 0.9f, 1f, 1f);
+            label.resizeTextForBestFit = true;
+            label.resizeTextMinSize = 10;
+            label.resizeTextMaxSize = 17;
+            LayoutElement labelLayout = label.GetComponent<LayoutElement>();
+            labelLayout.minHeight = 24f;
+            labelLayout.preferredHeight = 24f;
+
             GameObject iconObject = new GameObject("Icon", typeof(RectTransform), typeof(Image), typeof(LayoutElement));
             iconObject.transform.SetParent(buttonObject.transform, false);
             LayoutElement iconLayout = iconObject.GetComponent<LayoutElement>();
-            iconLayout.preferredWidth = 50f;
-            iconLayout.preferredHeight = 50f;
+            iconLayout.preferredWidth = 58f;
+            iconLayout.preferredHeight = 58f;
             Image icon = iconObject.GetComponent<Image>();
             icon.sprite = GetMaterialIcon(index);
             icon.preserveAspect = true;
 
-            Text label = CreateText(displayName, 17, FontStyle.Bold, TextAnchor.MiddleCenter, buttonObject.transform);
-            label.gameObject.name = "Name";
-            label.color = new Color(0.88f, 0.95f, 1f, 1f);
-            label.resizeTextForBestFit = true;
-            label.resizeTextMinSize = 12;
-            label.resizeTextMaxSize = 17;
-            LayoutElement labelLayout = label.GetComponent<LayoutElement>();
-            labelLayout.minHeight = 25f;
-            labelLayout.preferredHeight = 25f;
-
-            Text quantity = CreateText("x0", 18, FontStyle.Bold, TextAnchor.MiddleCenter, buttonObject.transform);
+            Text quantity = CreateText("x0", 20, FontStyle.Bold, TextAnchor.MiddleCenter, buttonObject.transform);
             quantity.gameObject.name = "Quantity";
-            quantity.color = new Color(0.36f, 0.86f, 1f, 1f);
+            quantity.color = new Color(0.16f, 0.82f, 1f, 1f);
             quantity.resizeTextForBestFit = true;
-            quantity.resizeTextMinSize = 14;
-            quantity.resizeTextMaxSize = 18;
+            quantity.resizeTextMinSize = 13;
+            quantity.resizeTextMaxSize = 20;
             LayoutElement quantityLayout = quantity.GetComponent<LayoutElement>();
             quantityLayout.minHeight = 25f;
             quantityLayout.preferredHeight = 25f;
 
             Button button = buttonObject.GetComponent<Button>();
             ColorBlock colors = button.colors;
-            colors.normalColor = new Color(0.035f, 0.055f, 0.105f, 1f);
-            colors.highlightedColor = new Color(0.07f, 0.13f, 0.24f, 1f);
-            colors.pressedColor = new Color(0.025f, 0.04f, 0.075f, 1f);
-            colors.disabledColor = new Color(0.02f, 0.03f, 0.055f, 0.8f);
+            colors.normalColor = Color.white;
+            colors.highlightedColor = Color.white;
+            colors.pressedColor = new Color(0.62f, 0.76f, 0.96f, 0.95f);
+            colors.selectedColor = colors.highlightedColor;
+            colors.disabledColor = new Color(0.38f, 0.44f, 0.55f, 0.72f);
             button.colors = colors;
+            button.targetGraphic = background;
             return button;
+        }
+
+        private Slider CreateVolumeSlider(
+            string text,
+            Transform parent,
+            out Text valueText)
+        {
+            GameObject rowObject = new GameObject(
+                text + " Volume Row",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(Slider),
+                typeof(LayoutElement));
+            rowObject.transform.SetParent(parent, false);
+
+            LayoutElement rowLayout = rowObject.GetComponent<LayoutElement>();
+            rowLayout.minHeight = 62f;
+            rowLayout.preferredHeight = 62f;
+            rowLayout.flexibleWidth = 1f;
+
+            Image rowImage = rowObject.GetComponent<Image>();
+            rowImage.sprite = GetChamferedUiSprite();
+            rowImage.type = Image.Type.Sliced;
+            rowImage.color = new Color(0.02f, 0.065f, 0.12f, 0.96f);
+            AddPanelOutline(
+                rowObject,
+                new Color(0.1f, 0.34f, 0.56f, 0.86f),
+                new Vector2(1.25f, -1.25f));
+
+            Text label = CreateText(
+                text,
+                24,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                rowObject.transform);
+            RectTransform labelRect = label.GetComponent<RectTransform>();
+            labelRect.anchorMin = new Vector2(0.06f, 0f);
+            labelRect.anchorMax = new Vector2(0.28f, 1f);
+            labelRect.offsetMin = Vector2.zero;
+            labelRect.offsetMax = Vector2.zero;
+            label.color = new Color(0.84f, 0.94f, 1f, 1f);
+            label.horizontalOverflow = HorizontalWrapMode.Overflow;
+
+            GameObject trackObject = new GameObject(
+                "Track",
+                typeof(RectTransform),
+                typeof(Image));
+            trackObject.transform.SetParent(rowObject.transform, false);
+            RectTransform trackRect = trackObject.GetComponent<RectTransform>();
+            trackRect.anchorMin = new Vector2(0.32f, 0.42f);
+            trackRect.anchorMax = new Vector2(0.78f, 0.58f);
+            trackRect.offsetMin = Vector2.zero;
+            trackRect.offsetMax = Vector2.zero;
+            Image trackImage = trackObject.GetComponent<Image>();
+            trackImage.sprite = GetChamferedUiSprite();
+            trackImage.type = Image.Type.Sliced;
+            trackImage.color = new Color(0.035f, 0.12f, 0.2f, 1f);
+
+            GameObject fillArea = new GameObject(
+                "Fill Area",
+                typeof(RectTransform));
+            fillArea.transform.SetParent(trackObject.transform, false);
+            RectTransform fillAreaRect = fillArea.GetComponent<RectTransform>();
+            fillAreaRect.anchorMin = Vector2.zero;
+            fillAreaRect.anchorMax = Vector2.one;
+            fillAreaRect.offsetMin = new Vector2(4f, 0f);
+            fillAreaRect.offsetMax = new Vector2(-4f, 0f);
+
+            GameObject fillObject = new GameObject(
+                "Fill",
+                typeof(RectTransform),
+                typeof(Image));
+            fillObject.transform.SetParent(fillArea.transform, false);
+            RectTransform fillRect = fillObject.GetComponent<RectTransform>();
+            fillRect.anchorMin = Vector2.zero;
+            fillRect.anchorMax = Vector2.one;
+            fillRect.offsetMin = Vector2.zero;
+            fillRect.offsetMax = Vector2.zero;
+            Image fillImage = fillObject.GetComponent<Image>();
+            fillImage.sprite = GetChamferedUiSprite();
+            fillImage.type = Image.Type.Sliced;
+            fillImage.color = new Color(0.2f, 0.72f, 1f, 1f);
+
+            GameObject handleArea = new GameObject(
+                "Handle Slide Area",
+                typeof(RectTransform));
+            handleArea.transform.SetParent(rowObject.transform, false);
+            RectTransform handleAreaRect = handleArea.GetComponent<RectTransform>();
+            handleAreaRect.anchorMin = new Vector2(0.32f, 0.22f);
+            handleAreaRect.anchorMax = new Vector2(0.78f, 0.78f);
+            handleAreaRect.offsetMin = Vector2.zero;
+            handleAreaRect.offsetMax = Vector2.zero;
+
+            GameObject handleObject = new GameObject(
+                "Handle",
+                typeof(RectTransform),
+                typeof(Image));
+            handleObject.transform.SetParent(handleArea.transform, false);
+            RectTransform handleRect = handleObject.GetComponent<RectTransform>();
+            handleRect.sizeDelta = new Vector2(26f, 26f);
+            Image handleImage = handleObject.GetComponent<Image>();
+            handleImage.sprite = GetChamferedUiSprite();
+            handleImage.type = Image.Type.Sliced;
+            handleImage.color = new Color(0.8f, 0.96f, 1f, 1f);
+
+            valueText = CreateText(
+                "100%",
+                22,
+                FontStyle.Bold,
+                TextAnchor.MiddleRight,
+                rowObject.transform);
+            RectTransform valueRect = valueText.GetComponent<RectTransform>();
+            valueRect.anchorMin = new Vector2(0.8f, 0f);
+            valueRect.anchorMax = new Vector2(0.95f, 1f);
+            valueRect.offsetMin = Vector2.zero;
+            valueRect.offsetMax = Vector2.zero;
+            valueText.color = new Color(1f, 0.84f, 0.36f, 1f);
+
+            Slider slider = rowObject.GetComponent<Slider>();
+            slider.minValue = 0f;
+            slider.maxValue = 1f;
+            slider.value = 1f;
+            slider.wholeNumbers = false;
+            slider.direction = Slider.Direction.LeftToRight;
+            slider.targetGraphic = handleImage;
+            slider.fillRect = fillRect;
+            slider.handleRect = handleRect;
+            return slider;
+        }
+
+        private static void UpdateVolumeValueText(Text valueText, float value)
+        {
+            if (valueText == null)
+            {
+                return;
+            }
+
+            valueText.text = Mathf.RoundToInt(Mathf.Clamp01(value) * 100f) + "%";
         }
 
         private Toggle CreateToggle(string text, Transform parent)
         {
-            GameObject toggleObject = new GameObject(text + " Toggle", typeof(RectTransform), typeof(Toggle), typeof(LayoutElement));
+            GameObject toggleObject = new GameObject(
+                text + " Toggle",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(Toggle),
+                typeof(LayoutElement));
             toggleObject.transform.SetParent(parent, false);
-            toggleObject.GetComponent<LayoutElement>().preferredHeight = 64f;
+            LayoutElement rowLayout = toggleObject.GetComponent<LayoutElement>();
+            rowLayout.minHeight = 58f;
+            rowLayout.preferredHeight = 58f;
+            rowLayout.flexibleWidth = 1f;
+
+            Image rowImage = toggleObject.GetComponent<Image>();
+            rowImage.sprite = GetChamferedUiSprite();
+            rowImage.type = Image.Type.Sliced;
+            rowImage.color = new Color(0.02f, 0.065f, 0.12f, 0.96f);
+            AddPanelOutline(
+                toggleObject,
+                new Color(0.1f, 0.34f, 0.56f, 0.86f),
+                new Vector2(1.25f, -1.25f));
 
             GameObject background = new GameObject("Background", typeof(RectTransform), typeof(Image));
             background.transform.SetParent(toggleObject.transform, false);
             RectTransform backgroundRect = background.GetComponent<RectTransform>();
-            backgroundRect.anchorMin = new Vector2(0f, 0.5f);
-            backgroundRect.anchorMax = new Vector2(0f, 0.5f);
-            backgroundRect.sizeDelta = new Vector2(48f, 48f);
-            backgroundRect.anchoredPosition = new Vector2(34f, 0f);
-            background.GetComponent<Image>().color = new Color(0.12f, 0.16f, 0.24f, 1f);
+            backgroundRect.anchorMin = new Vector2(0.74f, 0.22f);
+            backgroundRect.anchorMax = new Vector2(0.94f, 0.78f);
+            backgroundRect.offsetMin = Vector2.zero;
+            backgroundRect.offsetMax = Vector2.zero;
+            Image toggleTarget = background.GetComponent<Image>();
+            toggleTarget.sprite = GetChamferedUiSprite();
+            toggleTarget.type = Image.Type.Sliced;
+            toggleTarget.color = new Color(0.035f, 0.12f, 0.2f, 1f);
+            AddPanelOutline(
+                background,
+                new Color(0.12f, 0.52f, 0.84f, 0.92f),
+                new Vector2(1f, -1f));
 
-            GameObject checkmark = new GameObject("Checkmark", typeof(RectTransform), typeof(Image));
+            // Knob anchors: it slides between the left ("off") and right ("on")
+            // edges of the track instead of appearing/disappearing.
+            Vector2 knobOffAnchorMin = new Vector2(0.1f, 0.14f);
+            Vector2 knobOffAnchorMax = new Vector2(0.44f, 0.86f);
+            Vector2 knobOnAnchorMin = new Vector2(0.56f, 0.14f);
+            Vector2 knobOnAnchorMax = new Vector2(0.9f, 0.86f);
+            Color knobOffColor = new Color(0.46f, 0.52f, 0.58f, 1f);
+            Color knobOnColor = new Color(0.38f, 0.92f, 1f, 1f);
+            Color trackOffColor = new Color(0.035f, 0.12f, 0.2f, 1f);
+            Color trackOnColor = new Color(0.06f, 0.3f, 0.5f, 1f);
+
+            GameObject checkmark = new GameObject("Knob", typeof(RectTransform), typeof(Image));
             checkmark.transform.SetParent(background.transform, false);
             RectTransform checkmarkRect = checkmark.GetComponent<RectTransform>();
-            checkmarkRect.anchorMin = new Vector2(0.2f, 0.2f);
-            checkmarkRect.anchorMax = new Vector2(0.8f, 0.8f);
+            checkmarkRect.anchorMin = knobOffAnchorMin;
+            checkmarkRect.anchorMax = knobOffAnchorMax;
             checkmarkRect.offsetMin = Vector2.zero;
             checkmarkRect.offsetMax = Vector2.zero;
-            checkmark.GetComponent<Image>().color = new Color(0.3f, 0.8f, 1f, 1f);
+            Image checkmarkImage = checkmark.GetComponent<Image>();
+            checkmarkImage.sprite = GetChamferedUiSprite();
+            checkmarkImage.type = Image.Type.Sliced;
+            checkmarkImage.color = knobOffColor;
 
-            Text label = CreateText(text, 28, FontStyle.Normal, TextAnchor.MiddleLeft, toggleObject.transform);
+            Text label = CreateText(
+                text,
+                27,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                toggleObject.transform);
             RectTransform labelRect = label.GetComponent<RectTransform>();
-            labelRect.anchorMin = Vector2.zero;
-            labelRect.anchorMax = Vector2.one;
-            labelRect.offsetMin = new Vector2(86f, 0f);
+            labelRect.anchorMin = new Vector2(0.07f, 0f);
+            labelRect.anchorMax = new Vector2(0.64f, 1f);
+            labelRect.offsetMin = Vector2.zero;
             labelRect.offsetMax = Vector2.zero;
+            label.color = new Color(0.84f, 0.94f, 1f, 1f);
+            label.horizontalOverflow = HorizontalWrapMode.Overflow;
+            label.verticalOverflow = VerticalWrapMode.Truncate;
 
             Toggle toggle = toggleObject.GetComponent<Toggle>();
-            toggle.targetGraphic = background.GetComponent<Image>();
-            toggle.graphic = checkmark.GetComponent<Image>();
+            toggle.targetGraphic = toggleTarget;
+            // Leave graphic null so Unity does not show/hide the knob; the
+            // switch component below slides and recolours it instead.
+            toggle.graphic = null;
+
+            StarForgeToggleSwitch toggleSwitch =
+                toggleObject.AddComponent<StarForgeToggleSwitch>();
+            toggleSwitch.Configure(
+                toggle,
+                checkmarkRect,
+                checkmarkImage,
+                toggleTarget,
+                knobOffAnchorMin,
+                knobOffAnchorMax,
+                knobOnAnchorMin,
+                knobOnAnchorMax,
+                knobOffColor,
+                knobOnColor,
+                trackOffColor,
+                trackOnColor);
             return toggle;
+        }
+
+        private void CreateSpaceBackdrop(RectTransform root)
+        {
+            GameObject backdropObject = new GameObject(
+                "Space Backdrop",
+                typeof(RectTransform),
+                typeof(RawImage));
+            backdropObject.transform.SetParent(root, false);
+            RectTransform rect = backdropObject.GetComponent<RectTransform>();
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+
+            spaceBackdropImage = backdropObject.GetComponent<RawImage>();
+            spaceBackdropImage.texture = GetSpaceBackdropTexture(false);
+            spaceBackdropImage.color = new Color(0.7f, 0.86f, 1f, 0.72f);
+            spaceBackdropImage.raycastTarget = false;
+            GetSpaceBackdropTexture(true);
+        }
+
+        private void SetSpaceBackdropExpanded(bool expanded)
+        {
+            if (spaceBackdropImage == null)
+            {
+                return;
+            }
+
+            spaceBackdropImage.texture = GetSpaceBackdropTexture(expanded);
+        }
+
+        private Texture2D GetSpaceBackdropTexture(bool expanded)
+        {
+            Texture2D cachedTexture = expanded
+                ? expandedSpaceBackdropTexture
+                : spaceBackdropTexture;
+            if (cachedTexture != null)
+            {
+                return cachedTexture;
+            }
+
+            const int width = 256;
+            const int height = 512;
+            Color[] pixels = new Color[width * height];
+            for (int y = 0; y < height; y++)
+            {
+                float v = (float)y / height;
+                for (int x = 0; x < width; x++)
+                {
+                    float u = (float)x / width;
+                    float nebula = Mathf.PerlinNoise(u * 2.4f + 7.1f, v * 3.2f + 2.8f);
+                    float alpha = Mathf.Clamp01((nebula - 0.62f) * 0.09f);
+                    pixels[y * width + x] = IsPlanetBackdropExclusion(
+                        x,
+                        y,
+                        width,
+                        height,
+                        expanded)
+                        ? Color.clear
+                        : new Color(0.08f, 0.22f, 0.48f, alpha);
+                }
+            }
+
+            System.Random random = new System.Random(302930);
+            for (int i = 0; i < 190; i++)
+            {
+                int centerX = random.Next(2, width - 2);
+                int centerY = random.Next(2, height - 2);
+                int radius = random.NextDouble() > 0.88 ? 2 : 1;
+                float brightness = 0.28f + (float)random.NextDouble() * 0.62f;
+                Color starColor = random.NextDouble() > 0.72
+                    ? new Color(0.42f, 0.72f, 1f, brightness)
+                    : new Color(0.82f, 0.92f, 1f, brightness);
+
+                if (IsPlanetBackdropExclusion(
+                    centerX,
+                    centerY,
+                    width,
+                    height,
+                    expanded))
+                {
+                    continue;
+                }
+
+                for (int offsetY = -radius; offsetY <= radius; offsetY++)
+                {
+                    for (int offsetX = -radius; offsetX <= radius; offsetX++)
+                    {
+                        float distance = Mathf.Sqrt(offsetX * offsetX + offsetY * offsetY);
+                        if (distance > radius)
+                        {
+                            continue;
+                        }
+
+                        int pixelX = centerX + offsetX;
+                        int pixelY = centerY + offsetY;
+                        if (IsPlanetBackdropExclusion(
+                            pixelX,
+                            pixelY,
+                            width,
+                            height,
+                            expanded))
+                        {
+                            continue;
+                        }
+
+                        int pixelIndex = pixelY * width + pixelX;
+                        float falloff = 1f - distance / (radius + 0.5f);
+                        Color existing = pixels[pixelIndex];
+                        pixels[pixelIndex] = Color.Lerp(existing, starColor, falloff);
+                    }
+                }
+            }
+
+            Texture2D texture = new Texture2D(width, height, TextureFormat.RGBA32, true);
+            texture.name = expanded
+                ? "StarForge Space Backdrop Expanded Exclusion"
+                : "StarForge Space Backdrop";
+            texture.wrapMode = TextureWrapMode.Clamp;
+            texture.filterMode = FilterMode.Bilinear;
+            texture.SetPixels(pixels);
+            texture.Apply(true, false);
+
+            if (expanded)
+            {
+                expandedSpaceBackdropTexture = texture;
+            }
+            else
+            {
+                spaceBackdropTexture = texture;
+            }
+
+            return texture;
+        }
+
+        private static bool IsPlanetBackdropExclusion(
+            int x,
+            int y,
+            int width,
+            int height,
+            bool expanded)
+        {
+            float normalizedX = ((float)x + 0.5f) / width;
+            float normalizedY = ((float)y + 0.5f) / height;
+            float horizontalRadius = expanded ? 0.52f : 0.3f;
+            float verticalRadius = expanded ? 0.36f : 0.19f;
+            float ellipseX = (normalizedX - 0.5f) / horizontalRadius;
+            float ellipseY = (normalizedY - 0.55f) / verticalRadius;
+            return ellipseX * ellipseX + ellipseY * ellipseY <= 1f;
+        }
+
+        private Image ApplySpaceFrame(
+            GameObject target,
+            Color fill,
+            Color accent,
+            float inset)
+        {
+            Image outer = target.GetComponent<Image>();
+            if (outer == null)
+            {
+                return null;
+            }
+
+            Sprite sprite = GetChamferedUiSprite();
+            outer.sprite = sprite;
+            outer.type = Image.Type.Sliced;
+            outer.color = accent;
+
+            Transform existingFill = target.transform.Find("Space Frame Fill");
+            Image inner;
+            if (existingFill == null)
+            {
+                GameObject fillObject = new GameObject(
+                    "Space Frame Fill",
+                    typeof(RectTransform),
+                    typeof(Image),
+                    typeof(LayoutElement));
+                fillObject.transform.SetParent(target.transform, false);
+                fillObject.transform.SetAsFirstSibling();
+                fillObject.GetComponent<LayoutElement>().ignoreLayout = true;
+                inner = fillObject.GetComponent<Image>();
+                inner.raycastTarget = false;
+            }
+            else
+            {
+                inner = existingFill.GetComponent<Image>();
+            }
+
+            RectTransform innerRect = inner.rectTransform;
+            innerRect.anchorMin = Vector2.zero;
+            innerRect.anchorMax = Vector2.one;
+            innerRect.offsetMin = new Vector2(inset, inset);
+            innerRect.offsetMax = new Vector2(-inset, -inset);
+            inner.sprite = sprite;
+            inner.type = Image.Type.Sliced;
+            inner.color = fill;
+
+            Transform existingSheen = target.transform.Find("Space Frame Sheen");
+            if (existingSheen == null)
+            {
+                GameObject sheenObject = new GameObject(
+                    "Space Frame Sheen",
+                    typeof(RectTransform),
+                    typeof(Image),
+                    typeof(LayoutElement));
+                sheenObject.transform.SetParent(target.transform, false);
+                sheenObject.transform.SetSiblingIndex(1);
+                sheenObject.GetComponent<LayoutElement>().ignoreLayout = true;
+                Image sheen = sheenObject.GetComponent<Image>();
+                sheen.sprite = sprite;
+                sheen.type = Image.Type.Sliced;
+                sheen.color = new Color(0.45f, 0.78f, 1f, 0.035f);
+                sheen.raycastTarget = false;
+
+                RectTransform sheenRect = sheenObject.GetComponent<RectTransform>();
+                sheenRect.anchorMin = new Vector2(0.025f, 0.56f);
+                sheenRect.anchorMax = new Vector2(0.975f, 0.96f);
+                sheenRect.offsetMin = Vector2.zero;
+                sheenRect.offsetMax = Vector2.zero;
+            }
+
+            Button button = target.GetComponent<Button>();
+            if (button != null)
+            {
+                inner.raycastTarget = true;
+                button.targetGraphic = inner;
+            }
+
+            AddPanelOutline(
+                target,
+                new Color(accent.r * 0.55f, accent.g * 0.72f, accent.b, accent.a),
+                new Vector2(1.25f, -1.25f));
+            return inner;
+        }
+
+        private Image ApplyCanvasFrame(
+            GameObject target,
+            Color fill,
+            Color accent,
+            float inset)
+        {
+            Image inner = ApplySpaceFrame(target, fill, accent, inset);
+            if (target == null)
+            {
+                return inner;
+            }
+
+            Transform sheen = target.transform.Find("Space Frame Sheen");
+            if (sheen != null)
+            {
+                sheen.gameObject.SetActive(false);
+            }
+
+            Outline outline = target.GetComponent<Outline>();
+            if (outline != null)
+            {
+                outline.effectColor = new Color(
+                    accent.r * 0.32f,
+                    accent.g * 0.5f,
+                    accent.b,
+                    Mathf.Min(accent.a, 0.58f));
+                outline.effectDistance = new Vector2(0.75f, -0.75f);
+            }
+
+            return inner;
+        }
+
+        private void ApplyCanvasButtonStyle(
+            Button button,
+            Color fill,
+            Color accent,
+            Color textColor)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            Image target = ApplyCanvasFrame(button.gameObject, fill, accent, 1.5f);
+            if (target != null)
+            {
+                target.raycastTarget = true;
+                button.targetGraphic = target;
+            }
+
+            ColorBlock colors = button.colors;
+            colors.normalColor = Color.white;
+            colors.highlightedColor = new Color(0.94f, 0.98f, 1f, 1f);
+            colors.pressedColor = new Color(0.67f, 0.79f, 0.94f, 0.96f);
+            colors.selectedColor = colors.highlightedColor;
+            colors.disabledColor = new Color(0.38f, 0.42f, 0.5f, 0.68f);
+            colors.colorMultiplier = 1f;
+            button.colors = colors;
+            SetButtonTextColor(button, textColor);
+
+            Text label = button.GetComponentInChildren<Text>();
+            if (label != null && label.GetComponent<Shadow>() == null)
+            {
+                Shadow shadow = label.gameObject.AddComponent<Shadow>();
+                shadow.effectColor = new Color(0f, 0f, 0f, 0.78f);
+                shadow.effectDistance = new Vector2(1.5f, -1.5f);
+            }
+        }
+
+        private static void SetRectAnchors(
+            GameObject target,
+            float minX,
+            float minY,
+            float maxX,
+            float maxY)
+        {
+            if (target == null)
+            {
+                return;
+            }
+
+            RectTransform rect = target.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(minX, minY);
+            rect.anchorMax = new Vector2(maxX, maxY);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+        }
+
+        private static void StretchRect(RectTransform rect, Vector2 inset)
+        {
+            if (rect == null)
+            {
+                return;
+            }
+
+            rect.anchorMin = Vector2.zero;
+            rect.anchorMax = Vector2.one;
+            rect.offsetMin = inset;
+            rect.offsetMax = -inset;
+        }
+
+        private static void CreateHorizontalDivider(
+            Transform parent,
+            float normalizedY,
+            Color color,
+            float minX,
+            float maxX)
+        {
+            GameObject divider = new GameObject(
+                "Horizontal Divider",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(LayoutElement));
+            divider.transform.SetParent(parent, false);
+            divider.GetComponent<LayoutElement>().ignoreLayout = true;
+
+            RectTransform rect = divider.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(minX, normalizedY);
+            rect.anchorMax = new Vector2(maxX, normalizedY);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(0f, 1.5f);
+            rect.anchoredPosition = Vector2.zero;
+
+            Image image = divider.GetComponent<Image>();
+            image.color = color;
+            image.raycastTarget = false;
+        }
+
+        private Sprite GetChamferedUiSprite()
+        {
+            if (chamferedUiSprite != null)
+            {
+                return chamferedUiSprite;
+            }
+
+            const int size = 64;
+            const float radius = 16f;
+            Texture2D texture = new Texture2D(size, size, TextureFormat.RGBA32, false);
+            texture.name = "StarForge Rounded UI";
+            texture.wrapMode = TextureWrapMode.Clamp;
+            texture.filterMode = FilterMode.Bilinear;
+
+            Color32[] pixels = new Color32[size * size];
+            for (int y = 0; y < size; y++)
+            {
+                for (int x = 0; x < size; x++)
+                {
+                    // Signed-distance rounded rectangle with a 1px anti-aliased edge so
+                    // every panel/button corner reads as a soft, space-console curve.
+                    float px = x + 0.5f;
+                    float py = y + 0.5f;
+                    float dx = px < radius
+                        ? radius - px
+                        : (px > size - radius ? px - (size - radius) : 0f);
+                    float dy = py < radius
+                        ? radius - py
+                        : (py > size - radius ? py - (size - radius) : 0f);
+                    float distance = Mathf.Sqrt(dx * dx + dy * dy);
+                    float coverage = Mathf.Clamp01(radius - distance + 0.5f);
+                    pixels[y * size + x] =
+                        new Color32(255, 255, 255, (byte)Mathf.RoundToInt(coverage * 255f));
+                }
+            }
+
+            texture.SetPixels32(pixels);
+            texture.Apply(false, false);
+            chamferedUiSprite = Sprite.Create(
+                texture,
+                new Rect(0f, 0f, size, size),
+                new Vector2(0.5f, 0.5f),
+                100f,
+                0,
+                SpriteMeshType.FullRect,
+                new Vector4(radius, radius, radius, radius));
+            chamferedUiSprite.name = "StarForge Rounded UI Sprite";
+            return chamferedUiSprite;
         }
 
         private Text CreateText(string text, int fontSize, FontStyle style, TextAnchor anchor, Transform parent)
@@ -2278,44 +4087,6 @@ namespace StarForge.Presentation
             }
 
             return fallbackMaterialIcon;
-        }
-
-        private Sprite GetCollectionCircleSprite()
-        {
-            if (collectionCircleSprite != null)
-            {
-                return collectionCircleSprite;
-            }
-
-            const int size = 128;
-            Texture2D texture = new Texture2D(
-                size,
-                size,
-                TextureFormat.RGBA32,
-                false);
-            texture.name = "StarForge Collection Circle Mask";
-            texture.filterMode = FilterMode.Bilinear;
-
-            Vector2 center = new Vector2((size - 1) * 0.5f, (size - 1) * 0.5f);
-            float radius = size * 0.47f;
-            for (int y = 0; y < size; y++)
-            {
-                for (int x = 0; x < size; x++)
-                {
-                    float distance = Vector2.Distance(new Vector2(x, y), center);
-                    float alpha = Mathf.Clamp01(radius - distance + 1f);
-                    texture.SetPixel(x, y, new Color(1f, 1f, 1f, alpha));
-                }
-            }
-
-            texture.Apply();
-            collectionCircleSprite = Sprite.Create(
-                texture,
-                new Rect(0f, 0f, size, size),
-                new Vector2(0.5f, 0.5f),
-                100f);
-            collectionCircleSprite.name = "StarForge Collection Circle";
-            return collectionCircleSprite;
         }
 
         private static Sprite[] LoadMaterialIconSprites()
@@ -2380,6 +4151,31 @@ namespace StarForge.Presentation
             outline.effectColor = color;
             outline.effectDistance = distance;
             outline.useGraphicAlpha = true;
+        }
+
+        private static void AddVerticalDivider(
+            Transform parent,
+            float normalizedX,
+            Color color)
+        {
+            GameObject divider = new GameObject(
+                "Vertical Divider",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(LayoutElement));
+            divider.transform.SetParent(parent, false);
+            divider.GetComponent<LayoutElement>().ignoreLayout = true;
+
+            RectTransform rect = divider.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(normalizedX, 0.12f);
+            rect.anchorMax = new Vector2(normalizedX, 0.88f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.sizeDelta = new Vector2(1.5f, 0f);
+            rect.anchoredPosition = Vector2.zero;
+
+            Image image = divider.GetComponent<Image>();
+            image.color = color;
+            image.raycastTarget = false;
         }
 
         private static void AddFourSideBorder(GameObject target, Color color, float thickness)
@@ -2559,6 +4355,19 @@ namespace StarForge.Presentation
             return safeArea;
         }
 
+        private RectTransform CreateMainHudRoot(RectTransform root)
+        {
+            GameObject mainHudObject = new GameObject("Main HUD", typeof(RectTransform), typeof(CanvasGroup));
+            mainHudObject.transform.SetParent(root, false);
+            RectTransform mainHud = mainHudObject.GetComponent<RectTransform>();
+            mainHud.anchorMin = Vector2.zero;
+            mainHud.anchorMax = Vector2.one;
+            mainHud.offsetMin = Vector2.zero;
+            mainHud.offsetMax = Vector2.zero;
+            mainHudCanvasGroup = mainHudObject.GetComponent<CanvasGroup>();
+            return mainHud;
+        }
+
         private static void SetPreferredHeight(Text text, float height)
         {
             LayoutElement layoutElement = text.GetComponent<LayoutElement>();
@@ -2592,8 +4401,16 @@ namespace StarForge.Presentation
 
         private static string BuildResultBody(StarForgeEnhancementResult result)
         {
-            string body = result.message + "\n" +
-                          result.previousLevel + "강 → " + result.newLevel + "강";
+            string body = result.message;
+            if (result.kind != StarForgeResultKind.Failure &&
+                result.kind != StarForgeResultKind.Fracture)
+            {
+                body += "\n" +
+                        result.previousLevel +
+                        "강 → " +
+                        result.newLevel +
+                        "강";
+            }
 
             if (result.kind == StarForgeResultKind.Destroyed)
             {
@@ -2632,7 +4449,22 @@ namespace StarForge.Presentation
                 eventSystemObject.AddComponent<StandaloneInputModule>();
             }
 #endif
-            DontDestroyOnLoad(eventSystemObject);
+            if (Application.isPlaying)
+            {
+                DontDestroyOnLoad(eventSystemObject);
+            }
+        }
+    }
+
+    internal sealed class StarForgeDragRotationInput :
+        MonoBehaviour,
+        IDragHandler
+    {
+        public event Action<Vector2> Dragged;
+
+        public void OnDrag(PointerEventData eventData)
+        {
+            Dragged?.Invoke(eventData.delta);
         }
     }
 }

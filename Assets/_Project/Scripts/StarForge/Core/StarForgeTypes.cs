@@ -11,6 +11,39 @@ namespace StarForge.Core
         PrimordialStar = 4
     }
 
+    public enum StarForgePlanetShape
+    {
+        Default = 0,
+        Heart = 1,
+        Cat = 2
+    }
+
+    public static class StarForgePlanetShapes
+    {
+        /// <summary>chances는 [기본, 하트, 고양이] 퍼센트. roll01은 0~1 난수.</summary>
+        public static StarForgePlanetShape Roll(float[] chances, Func<float> roll01)
+        {
+            float defaultChance = chances != null && chances.Length > 0 ? Math.Max(0f, chances[0]) : 80f;
+            float heartChance = chances != null && chances.Length > 1 ? Math.Max(0f, chances[1]) : 12f;
+            float catChance = chances != null && chances.Length > 2 ? Math.Max(0f, chances[2]) : 8f;
+            float total = defaultChance + heartChance + catChance;
+            if (total <= 0f)
+            {
+                return StarForgePlanetShape.Default;
+            }
+
+            float roll = (roll01 != null ? Math.Max(0f, Math.Min(1f, roll01())) : 0f) * total;
+            if (roll < defaultChance)
+            {
+                return StarForgePlanetShape.Default;
+            }
+
+            return roll < defaultChance + heartChance
+                ? StarForgePlanetShape.Heart
+                : StarForgePlanetShape.Cat;
+        }
+    }
+
     public enum StarForgeResultKind
     {
         None = 0,

@@ -8,6 +8,7 @@ namespace StarForge.Data
     {
         public int maxLevel = 30;
         public int firstLaunchMeteorFragments = 100;
+        public float[] shapeChancesPercent = { 80f, 12f, 8f };
         public float fracturedDestructionMultiplier = 2f;
         public CurrencyConfig[] currencies;
         public AttemptBalance[] attempts;
@@ -66,6 +67,27 @@ namespace StarForge.Data
             }
 
             return StageVisualConfig.CreateFallback(level);
+        }
+
+        /// <summary>모양(기본/하트/고양이)에 맞는 단계 이름을 돌려줍니다.</summary>
+        public string GetStageName(int level, StarForgePlanetShape shape)
+        {
+            StageVisualConfig stage = GetStage(level);
+            switch (shape)
+            {
+                case StarForgePlanetShape.Heart:
+                    return string.IsNullOrEmpty(stage.heartName) ? stage.displayName : stage.heartName;
+                case StarForgePlanetShape.Cat:
+                    return string.IsNullOrEmpty(stage.catName) ? stage.displayName : stage.catName;
+                default:
+                    return stage.displayName;
+            }
+        }
+
+        public CurrencyAmount[] GetDisassembleReward(int level)
+        {
+            StageVisualConfig stage = GetStage(level);
+            return stage != null ? stage.disassembleReward : null;
         }
 
         public CurrencyConfig GetCurrency(StarForgeCurrencyType type)
@@ -167,10 +189,13 @@ namespace StarForge.Data
     {
         public int level;
         public string displayName;
+        public string heartName;
+        public string catName;
         public string color;
         public float scale = 1f;
         public float emission = 0.4f;
         public float rotationSpeed = 18f;
+        public CurrencyAmount[] disassembleReward;
 
         public static StageVisualConfig CreateFallback(int level)
         {

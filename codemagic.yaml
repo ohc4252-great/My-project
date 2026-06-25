@@ -1,0 +1,101 @@
+# Codemagic CI/CD — StarForge(별 강화하기) iOS 클라우드 빌드
+# Mac 없이 Codemagic의 macOS 머신에서 Unity → Xcode → .ipa → TestFlight 까지 처리한다.
+#
+# ── 빌드 전 Codemagic UI에서 먼저 등록할 것 ─────────────────────────────
+# 1) Environment variable group "unity" (Codemagic > 앱 > Environment variables)
+#      UNITY_SERIAL    : Unity 시리얼 (Personal 무료면 아래 "Unity 라이선스" 주석 참고)
+#      UNITY_EMAIL     : Unity 계정 이메일
+#      UNITY_PASSWORD  : Unity 계정 비밀번호  (※ Secure 체크)
+#      UNITY_HOME      : 빌드 머신의 Unity 경로
+#                        예) /Applications/Unity/Hub/Editor/6000.4.4f1/Unity.app
+# 2) App Store Connect API key (Codemagic > Teams > Integrations > App Store Connect)
+#      Apple Developer($99/년) 계정에서 발급한 .p8 + Issuer ID + Key ID 등록.
+#      아래 integrations.app_store_connect 값에 그 "키 이름"을 적는다.
+# 3) Apple Developer 포털에 App ID(com.starforge.stellarsmith)와
+#      App Store Connect에 앱 레코드가 먼저 만들어져 있어야 TestFlight 업로드가 된다.
+# ───────────────────────────────────────────────────────────────────────
+
+workflows:
+  ios-release:
+    name: StarForge iOS (App Store / TestFlight)
+    max_build_duration: 120
+    instance_type: mac_mini_m2
+
+    environment:
+      groups:
+        - unity
+      vars:
+        UNITY_BIN: "${UNITY_HOME}/Contents/MacOS/Unity"
+        BUNDLE_ID: "com.starforge.stellarsmith"
+        XCODE_SCHEME: "Unity-iPhone"
+        # App Store Connect에 앱을 만든 뒤 받는 숫자 Apple ID(예: 6123456789).
+        # 아직 없으면 비워둬도 되고, 그땐 빌드 번호가 1부터 시작한다.
+        APP_APPLE_ID: ""
+      # 자동 코드 서명: App Store Connect API key로 프로비저닝 프로파일을 자동 발급/사용
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.starforge.stellarsmith
+      integrations:
+        # Codemagic UI에 등록한 App Store Connect API key의 "이름"으로 교체
+        app_store_connect: StarForge ASC Key
+
+    scripts:
+      - name: Unity 라이선스 활성화
+        # Personal(무료) 라이선스면 UNITY_SERIAL 없이 username/password 만으로도 시도되지만,
+        # 활성화가 불안정하면 .ulf 라이선스 파일 방식을 권장(Codemagic Unity 문서 참고).
+        script: |
+          "$UNITY_BIN" -batchmode -nographics -quit -logFile - \
+            -serial "${UNITY_SERIAL}" \
+            -username "${UNITY_EMAIL}" \
+            -password "${UNITY_PASSWORD}"
+
+      - name: Unity iOS 빌드 (Xcode 프로젝트 생성)
+        script: |
+          "$UNITY_BIN" -batchmode -nographics -quit -logFile - \
+            -projectPath . \
+            -executeMethod StarForge.EditorTools.StarForgeBuildPreparation.BuildiOSForCI
+        # 위 메서드가 ./ios 폴더에 Unity-iPhone Xcode 프로젝트를 생성한다.
+
+      - name: Unity 라이선스 반납
+        script: |
+          "$UNITY_BIN" -batchmode -nographics -quit -returnlicense -logFile - || true
+
+      - name: CocoaPods 설치 (AdMob 등 iOS 플러그인 의존성)
+        script: |
+          if [ -f "ios/Podfile" ]; then
+            cd ios && pod install
+          else
+            echo "Podfile 없음 — CocoaPods 단계 건너뜀"
+          fi
+
+      - name: 코드 서명 프로파일 적용
+        script: |
+          xcode-project use-profiles
+
+      - name: 빌드 번호 자동 증가
+        script: |
+          # TestFlight는 같은 버전의 빌드 번호 중복을 허용하지 않으므로 최신+1로 설정
+          BUILD_NUMBER=$(app-store-connect get-latest-testflight-build-number "$APP_APPLE_ID" 2>/dev/null || echo "0")
+          cd ios
+          agvtool new-version -all $(($BUILD_NUMBER + 1)) || true
+
+      - name: .ipa 빌드
+        script: |
+          WORKSPACE="ios/Unity-iPhone.xcworkspace"
+          PROJECT="ios/Unity-iPhone.xcodeproj"
+          if [ -d "$WORKSPACE" ]; then
+            xcode-project build-ipa --workspace "$WORKSPACE" --scheme "$XCODE_SCHEME"
+          else
+            xcode-project build-ipa --project "$PROJECT" --scheme "$XCODE_SCHEME"
+          fi
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - ios/build/ios/xcarchive/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        # true면 빌드 성공 시 TestFlight로 자동 업로드. App Store 심사 제출은 수동 권장.
+        submit_to_testflight: true
