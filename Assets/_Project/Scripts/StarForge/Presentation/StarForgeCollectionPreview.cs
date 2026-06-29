@@ -714,6 +714,9 @@ namespace StarForge.Presentation
             Light keyLight = lightObject.AddComponent<Light>();
             keyLight.type = LightType.Directional;
             keyLight.intensity = 1.35f;
+            // Match the main scene key light exactly (same intensity/rotation/color) so
+            // the planet reads identically in the collection and on the main screen.
+            keyLight.color = Color.white;
             keyLight.cullingMask = 1 << PreviewLayer;
 
             SetLayerRecursively(gameObject, PreviewLayer);

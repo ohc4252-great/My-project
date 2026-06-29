@@ -1,7 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Threading;
 using GoogleMobileAds.Api;
-using GoogleMobileAds.Common;
 using GoogleMobileAds.Ump.Api;
 using UnityEngine;
 
@@ -61,6 +62,10 @@ namespace StarForge.Presentation
             "ca-app-pub-3940256099942544/5224354917";
         private const string IosTestRewardedAdUnitId =
             "ca-app-pub-3940256099942544/1712485313";
+        private const float ConsentRequestTimeoutSeconds = 4f;
+        private readonly Queue<Action> pendingMainThreadActions =
+            new Queue<Action>();
+        private int mainThreadId;
 
         [Header("AdMob Rewarded Ad Unit IDs")]
 #pragma warning disable CS0414
@@ -80,15 +85,22 @@ namespace StarForge.Presentation
         private bool sdkInitialized;
         private bool consentRequestStarted;
         private bool consentRequestCompleted;
+        private bool consentFallbackApplied;
         private bool canRequestAds;
         private bool loadInProgress;
         private bool rewardEarned;
         private string loadedPlacementId;
         private Action<bool> pendingCompletion;
+        private Coroutine consentRequestTimeout;
 
         public static bool IsSdkAvailable()
         {
             return true;
+        }
+
+        private void Awake()
+        {
+            mainThreadId = Thread.CurrentThread.ManagedThreadId;
         }
 
         public void Configure(string androidAdUnitId, string iosAdUnitId)
@@ -131,7 +143,35 @@ namespace StarForge.Presentation
 
         private void Start()
         {
+            mainThreadId = Thread.CurrentThread.ManagedThreadId;
             GatherConsent();
+        }
+
+        private void Update()
+        {
+            while (true)
+            {
+                Action action;
+                lock (pendingMainThreadActions)
+                {
+                    if (pendingMainThreadActions.Count == 0)
+                    {
+                        return;
+                    }
+
+                    action = pendingMainThreadActions.Dequeue();
+                }
+
+                try
+                {
+                    action?.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning(
+                        "AdMob main-thread callback failed: " + ex);
+                }
+            }
         }
 
         private void OnDestroy()
@@ -262,35 +302,96 @@ namespace StarForge.Presentation
                 {
                     TagForUnderAgeOfConsent = false
                 };
-            ConsentInformation.Update(requestParameters, updateError =>
+
+            consentRequestTimeout =
+                StartCoroutine(CompleteConsentRequestAfterTimeout());
+
+            try
             {
-                RunOnMainThread(() =>
+                ConsentInformation.Update(requestParameters, updateError =>
                 {
-                    if (updateError != null)
+                    RunOnMainThread(() =>
                     {
-                        CompleteConsentRequest(updateError);
-                        return;
-                    }
+                        if (updateError != null)
+                        {
+                            CompleteConsentRequest(updateError);
+                            return;
+                        }
 
-                    if (ConsentInformation.CanRequestAds())
-                    {
-                        CompleteConsentRequest(null);
-                        return;
-                    }
-
-                    ConsentForm.LoadAndShowConsentFormIfRequired(showError =>
-                    {
-                        RunOnMainThread(
-                            () => CompleteConsentRequest(showError));
+                        try
+                        {
+                            ConsentForm.LoadAndShowConsentFormIfRequired(
+                                showError =>
+                                {
+                                    RunOnMainThread(
+                                        () => CompleteConsentRequest(showError));
+                                });
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.LogWarning(
+                                "AdMob consent form load threw: " + ex);
+                            CompleteConsentRequest(null, true);
+                        }
                     });
                 });
-            });
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("AdMob consent update threw: " + ex);
+                CompleteConsentRequest(null, true);
+            }
+        }
+
+        private IEnumerator CompleteConsentRequestAfterTimeout()
+        {
+            yield return new WaitForSecondsRealtime(
+                ConsentRequestTimeoutSeconds);
+
+            consentRequestTimeout = null;
+            if (consentRequestCompleted)
+            {
+                yield break;
+            }
+
+            Debug.LogWarning(
+                "AdMob consent request timed out; initializing ads without " +
+                "the consent gate.");
+            CompleteConsentRequest(null, true);
         }
 
         private void CompleteConsentRequest(FormError error)
         {
+            CompleteConsentRequest(error, false);
+        }
+
+        private void CompleteConsentRequest(
+            FormError error,
+            bool forceInitialize)
+        {
+            if (consentRequestCompleted)
+            {
+                return;
+            }
+
             consentRequestCompleted = true;
-            canRequestAds = ConsentInformation.CanRequestAds();
+            if (consentRequestTimeout != null)
+            {
+                StopCoroutine(consentRequestTimeout);
+                consentRequestTimeout = null;
+            }
+
+            try
+            {
+                canRequestAds = ConsentInformation.CanRequestAds();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning(
+                    "AdMob consent status check failed: " + ex);
+                canRequestAds = false;
+                forceInitialize = true;
+            }
             if (error != null)
             {
                 Debug.LogWarning(
@@ -305,17 +406,24 @@ namespace StarForge.Presentation
             // required; elsewhere we may still serve ads, so fall back to
             // initializing rather than letting a messaging misconfiguration
             // block ad serving entirely.
-            if (!canRequestAds)
+            if (!canRequestAds && (error != null || forceInitialize))
             {
                 Debug.LogWarning(
                     "AdMob consent unavailable; initializing ads without the " +
                     "consent gate (publisher messaging not configured).");
+                consentFallbackApplied = true;
                 canRequestAds = true;
             }
 
             if (canRequestAds)
             {
                 InitializeSdk();
+            }
+            else
+            {
+                Debug.LogWarning(
+                    "AdMob consent is required; ads will wait until consent " +
+                    "is available.");
             }
         }
 
@@ -393,7 +501,7 @@ namespace StarForge.Presentation
                 useTestAds);
             RewardedAd.Load(
                 adUnitId,
-                new AdRequest(),
+                CreateAdRequest(),
                 (ad, error) =>
                 {
                     RunOnMainThread(
@@ -501,6 +609,17 @@ namespace StarForge.Presentation
             completion?.Invoke(completed);
         }
 
+        private AdRequest CreateAdRequest()
+        {
+            AdRequest request = new AdRequest();
+            if (consentFallbackApplied)
+            {
+                request.Extras.Add("npa", "1");
+            }
+
+            return request;
+        }
+
         private string GetRewardedAdUnitId(string placementId)
         {
             if (useTestAds)
@@ -557,9 +676,24 @@ namespace StarForge.Presentation
                 : placementId;
         }
 
-        private static void RunOnMainThread(Action action)
+        private void RunOnMainThread(Action action)
         {
-            MobileAdsEventExecutor.ExecuteInUpdate(action);
+            if (action == null)
+            {
+                return;
+            }
+
+            if (mainThreadId != 0 &&
+                Thread.CurrentThread.ManagedThreadId == mainThreadId)
+            {
+                action();
+                return;
+            }
+
+            lock (pendingMainThreadActions)
+            {
+                pendingMainThreadActions.Enqueue(action);
+            }
         }
     }
 }

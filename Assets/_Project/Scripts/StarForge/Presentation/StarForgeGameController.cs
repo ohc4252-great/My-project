@@ -11,14 +11,20 @@ namespace StarForge.Presentation
     {
         private const float PlanetVerticalOffsetPixels = 50f;
         private const int BaseDailyMiningLimit = 3;
-        private const int UnlimitedMiningAdBonuses = -1;
+        private const int DailyMiningAdBonusLimit = 5;
         private const float CameraOrbitDegreesPerPixel = 0.22f;
         private const float CameraOrbitPitchLimit = 55f;
+        private const float BlackHoleDefaultCameraPitch = 10f;
         private const string MiningDateFormat = "yyyy-MM-dd";
         private const string DestructionKeepPlacement =
             "destruction_keep_level";
         private const string MiningBonusPlacement =
             "mining_bonus_attempt";
+        // Self-imposed throttle on the planet-keep revive ad so repeated views in a
+        // short window don't trip AdMob's serving limits.
+        private const float ReviveAdCooldownSeconds = 180f;
+        private const string ReviveAdCooldownPrefKey =
+            "StarForge.ReviveAd.CooldownUntilBinary";
         [Header("Optional Overrides")]
         [SerializeField] private TextAsset balanceJson;
         [SerializeField] private Camera targetCamera;
@@ -43,6 +49,7 @@ namespace StarForge.Presentation
 #pragma warning restore CS0414
 
         private readonly StarForgeEnhancementService enhancementService = new StarForgeEnhancementService();
+        private readonly StarForgeAchievementService achievementService = new StarForgeAchievementService();
         private readonly StarForgeMaterialExchangeService exchangeService = new StarForgeMaterialExchangeService();
         private readonly StarForgeReviveService reviveService = new StarForgeReviveService();
         private readonly StarForgeSaveRepository saveRepository = new StarForgeSaveRepository();
@@ -55,13 +62,14 @@ namespace StarForge.Presentation
         private bool rewardedAdInProgress;
         private CurrencyAmount[] lastMiningRewards;
         private string lastMiningSettledDateKey;
+        private int lastMiningScorePermyriad = -1;
         private int lastDestroyedLevel;
         private StarForgeEnhancementResult pendingDestroyedResult;
         private Coroutine cameraMoveRoutine;
         private float cameraOrbitYaw;
         private float cameraOrbitPitch;
         private float cameraDistance = 7.5f;
-
+        private bool cameraOrbitStateIsBlackHole;
         private void Awake()
         {
             Application.targetFrameRate = 60;
@@ -78,8 +86,11 @@ namespace StarForge.Presentation
 
         private void Start()
         {
+            StarForgeAchievementUnlock[] achievements =
+                CompleteAvailableAchievements();
             RefreshViews();
-            SetCameraZ(GetRestCameraZ(saveData.currentLevel));
+            SetCameraZ(GetRestCameraZForCurrentState());
+            ShowAchievementOverlays(achievements);
         }
 
         private void OnApplicationPause(bool pauseStatus)
@@ -110,16 +121,25 @@ namespace StarForge.Presentation
             hudView.VibrationToggled += HandleVibrationToggled;
             hudView.EnhancementAnimationSkipToggled +=
                 HandleEnhancementAnimationSkipToggled;
+            hudView.FractureAlertMutedToggled +=
+                HandleFractureAlertMutedToggled;
+            hudView.AchievementAlertMutedToggled +=
+                HandleAchievementAlertMutedToggled;
             hudView.CameraOrbitDragged += HandleCameraOrbitDragged;
             hudView.ReviveRequested += HandleReviveRequested;
             hudView.RewardedReviveRequested +=
                 HandleRewardedReviveRequested;
-            hudView.AdvertisingPrivacyOptionsRequested +=
-                HandleAdvertisingPrivacyOptionsRequested;
             hudView.DisassembleRequested += HandleDisassembleRequested;
             hudView.MiningRequested += HandleMiningRequested;
+            hudView.AchievementClaimRequested +=
+                HandleAchievementClaimRequested;
+            hudView.AchievementClaimAllRequested +=
+                HandleAchievementClaimAllRequested;
             miningGameView.MiningStopped += HandleMiningStopped;
+            miningGameView.MiningRewardAccepted +=
+                HandleMiningRewardAccepted;
             miningGameView.MiningClosed += HandleMiningClosed;
+            miningGameView.MiningAbandoned += HandleMiningAbandoned;
             miningGameView.ContinueWithAdRequested +=
                 HandleContinueWithAdRequested;
             miningGameView.BonusAttemptWithAdRequested +=
@@ -168,7 +188,7 @@ namespace StarForge.Presentation
             if (remainingPlays <= 0 && remainingAdBonuses <= 0)
             {
                 hudView.ShowMessage(
-                    "오늘의 별 채굴 완료",
+                    "오늘의 별 탐사 완료",
                     "오늘 기본 탐사를 모두 사용했습니다.");
                 return;
             }
@@ -183,7 +203,7 @@ namespace StarForge.Presentation
             int dailyLimit = saveData.GetMiningDailyLimit(
                 today,
                 BaseDailyMiningLimit,
-                UnlimitedMiningAdBonuses);
+                DailyMiningAdBonusLimit);
             if (!saveData.TryUseMiningPlay(today, dailyLimit))
             {
                 miningGameView.ShowDailyLimit();
@@ -192,17 +212,10 @@ namespace StarForge.Presentation
             }
 
             CurrencyAmount[] rewards = BuildMiningRewards(normalizedScore);
-            for (int i = 0; i < rewards.Length; i++)
-            {
-                CurrencyAmount reward = rewards[i];
-                if (reward != null && reward.amount > 0)
-                {
-                    saveData.AddCurrency(reward.type, reward.amount);
-                }
-            }
-
             lastMiningRewards = rewards;
             lastMiningSettledDateKey = today;
+            lastMiningScorePermyriad =
+                Mathf.RoundToInt(Mathf.Clamp01(normalizedScore) * 10000f);
             saveRepository.Save(saveData);
             RefreshViews();
             miningGameView.ShowOutcome(
@@ -210,6 +223,27 @@ namespace StarForge.Presentation
                 rewards,
                 saveData.GetRemainingMiningPlays(today, dailyLimit),
                 GetRemainingMiningAdBonuses());
+        }
+
+        private void HandleMiningRewardAccepted()
+        {
+            GrantPendingMiningRewards();
+        }
+
+        // Player bailed out of an in-progress run via the exit confirmation: the
+        // Attempt is spent, but no reward is granted and no result is shown.
+        private void HandleMiningAbandoned()
+        {
+            string today = GetMiningDateKey();
+            int dailyLimit = saveData.GetMiningDailyLimit(
+                today,
+                BaseDailyMiningLimit,
+                DailyMiningAdBonusLimit);
+            if (saveData.TryUseMiningPlay(today, dailyLimit))
+            {
+                saveRepository.Save(saveData);
+                RefreshViews();
+            }
         }
 
         private void HandleContinueWithAdRequested()
@@ -231,7 +265,6 @@ namespace StarForge.Presentation
             }
 
             string settledDateKey = lastMiningSettledDateKey;
-            CurrencyAmount[] rewardsToRollback = lastMiningRewards;
             rewardedAdInProgress = true;
             miningGameView.SetRewardedAdBusy(true);
             rewardedAdService.Show(
@@ -246,19 +279,9 @@ namespace StarForge.Presentation
                     }
 
                     saveData.RefundMiningPlay(settledDateKey);
-                    for (int i = 0; i < rewardsToRollback.Length; i++)
-                    {
-                        CurrencyAmount reward = rewardsToRollback[i];
-                        if (reward != null && reward.amount > 0)
-                        {
-                            saveData.TrySpendCurrency(
-                                reward.type,
-                                reward.amount);
-                        }
-                    }
-
                     lastMiningRewards = null;
                     lastMiningSettledDateKey = string.Empty;
+                    lastMiningScorePermyriad = -1;
                     saveRepository.Save(saveData);
                     RefreshViews();
                     miningGameView.ResumeRunWithBooster();
@@ -310,7 +333,7 @@ namespace StarForge.Presentation
                     string rewardDate = GetMiningDateKey();
                     if (!saveData.TryGrantMiningAdBonus(
                             rewardDate,
-                            UnlimitedMiningAdBonuses))
+                            DailyMiningAdBonusLimit))
                     {
                         miningGameView.ShowDailyLimit();
                         RefreshViews();
@@ -323,7 +346,7 @@ namespace StarForge.Presentation
                     int dailyLimit = saveData.GetMiningDailyLimit(
                         rewardDate,
                         BaseDailyMiningLimit,
-                        UnlimitedMiningAdBonuses);
+                        DailyMiningAdBonusLimit);
                     miningGameView.Open(
                         saveData.GetRemainingMiningPlays(rewardDate, dailyLimit),
                         GetRemainingMiningAdBonuses());
@@ -333,130 +356,119 @@ namespace StarForge.Presentation
 
         private void HandleMiningClosed()
         {
+            GrantPendingMiningRewards();
+            audioController.SetMiningModeActive(false);
+        }
+
+        private void GrantPendingMiningRewards()
+        {
+            CurrencyAmount[] rewards = lastMiningRewards;
+            if (rewards == null)
+            {
+                return;
+            }
+
+            string miningSettledDateKey = lastMiningSettledDateKey;
             lastMiningRewards = null;
             lastMiningSettledDateKey = string.Empty;
-            audioController.SetMiningModeActive(false);
+            if (lastMiningScorePermyriad >= 0)
+            {
+                saveData.RecordMiningCompletion(
+                    miningSettledDateKey,
+                    lastMiningScorePermyriad);
+            }
+
+            lastMiningScorePermyriad = -1;
+            for (int i = 0; i < rewards.Length; i++)
+            {
+                CurrencyAmount reward = rewards[i];
+                if (reward != null && reward.amount > 0)
+                {
+                    saveData.AddCurrency(reward.type, reward.amount);
+                }
+            }
+
+            StarForgeAchievementUnlock[] achievements =
+                achievementService.CompleteAvailable(saveData);
+            saveRepository.Save(saveData);
+            RefreshViews();
+            ShowAchievementOverlays(achievements);
         }
 
         private static CurrencyAmount[] BuildMiningRewards(float normalizedScore)
         {
-            return BuildMiningRewardsForRoll(
-                normalizedScore,
-                UnityEngine.Random.value,
-                UnityEngine.Random.value,
-                UnityEngine.Random.value);
-        }
-
-        private static CurrencyAmount[] BuildMiningRewardsForRoll(
-            float normalizedScore,
-            float rewardRoll,
-            float primaryAmountRoll,
-            float secondaryAmountRoll)
-        {
             float score = Mathf.Clamp01(normalizedScore);
-            float selection = Mathf.Clamp01(rewardRoll);
-            if (score >= 0.995f)
+            if (score >= 1f)
             {
-                if (selection < 0.01f)
-                {
-                    return new[]
-                    {
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.PrimordialStar,
-                            1)
-                    };
-                }
-
-                if (selection < 0.7f)
-                {
-                    return new[]
-                    {
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.SingularityShard,
-                            1)
-                    };
-                }
-
                 return new[]
                 {
                     new CurrencyAmount(
                         StarForgeCurrencyType.PureCoreShard,
-                        RollMiningAmount(14, 22, primaryAmountRoll)),
+                        100),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.SingularityShard,
+                        5),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.PrimordialStar,
+                        1)
+                };
+            }
+
+            if (score >= 0.5f)
+            {
+                return new[]
+                {
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.PureCoreShard,
+                        100),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.SingularityShard,
+                        2)
+                };
+            }
+
+            if (score >= 0.3f)
+            {
+                return new[]
+                {
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.PureCoreShard,
+                        50),
                     new CurrencyAmount(
                         StarForgeCurrencyType.SingularityShard,
                         1)
                 };
             }
 
-            if (score >= 0.9f)
+            if (score >= 0.2f)
             {
-                if (selection < 0.72f)
-                {
-                    return new[]
-                    {
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.PureCoreShard,
-                            RollMiningAmount(8, 15, primaryAmountRoll))
-                    };
-                }
-
                 return new[]
                 {
                     new CurrencyAmount(
-                        StarForgeCurrencyType.PureCoreShard,
-                        RollMiningAmount(5, 10, primaryAmountRoll)),
-                    new CurrencyAmount(
-                        StarForgeCurrencyType.SingularityShard,
-                        1)
-                };
-            }
-
-            if (score >= 0.7f)
-            {
-                if (selection < 0.55f)
-                {
-                    return new[]
-                    {
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.StarShard,
-                            RollMiningAmount(28, 50, primaryAmountRoll)),
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.PureCoreShard,
-                            RollMiningAmount(2, 4, secondaryAmountRoll))
-                    };
-                }
-
-                return new[]
-                {
-                    new CurrencyAmount(
-                        StarForgeCurrencyType.PureCoreShard,
-                        RollMiningAmount(4, 8, primaryAmountRoll))
-                };
-            }
-
-            if (score >= 0.4f)
-            {
-                if (selection < 0.58f)
-                {
-                    return new[]
-                    {
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.MeteorFragment,
-                            RollMiningAmount(60, 110, primaryAmountRoll)),
-                        new CurrencyAmount(
-                            StarForgeCurrencyType.StarShard,
-                            RollMiningAmount(8, 16, secondaryAmountRoll))
-                    };
-                }
-
-                return new[]
-                {
+                        StarForgeCurrencyType.MeteorFragment,
+                        500),
                     new CurrencyAmount(
                         StarForgeCurrencyType.StarShard,
-                        RollMiningAmount(15, 30, primaryAmountRoll)),
+                        150),
                     new CurrencyAmount(
                         StarForgeCurrencyType.PureCoreShard,
-                        RollMiningAmount(1, 2, secondaryAmountRoll))
+                        15)
+                };
+            }
+
+            if (score >= 0.1f)
+            {
+                return new[]
+                {
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.MeteorFragment,
+                        200),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.StarShard,
+                        100),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.PureCoreShard,
+                        5)
                 };
             }
 
@@ -464,30 +476,11 @@ namespace StarForge.Presentation
             {
                 new CurrencyAmount(
                     StarForgeCurrencyType.MeteorFragment,
-                    RollMiningAmount(30, 60, primaryAmountRoll)),
+                    100),
                 new CurrencyAmount(
                     StarForgeCurrencyType.StarShard,
-                    RollMiningAmount(5, 9, secondaryAmountRoll))
+                    30)
             };
-        }
-
-        private static int RollMiningAmount(
-            int minimum,
-            int maximum,
-            float roll)
-        {
-            if (maximum <= minimum)
-            {
-                return minimum;
-            }
-
-            float normalizedRoll = Mathf.Clamp(
-                roll,
-                0f,
-                0.999999f);
-            return minimum +
-                   Mathf.FloorToInt(
-                       normalizedRoll * (maximum - minimum + 1));
         }
 
         private int GetRemainingMiningPlays()
@@ -501,7 +494,7 @@ namespace StarForge.Presentation
             int dailyLimit = saveData.GetMiningDailyLimit(
                 today,
                 BaseDailyMiningLimit,
-                UnlimitedMiningAdBonuses);
+                DailyMiningAdBonusLimit);
             return saveData.GetRemainingMiningPlays(today, dailyLimit);
         }
 
@@ -515,7 +508,7 @@ namespace StarForge.Presentation
 
             return saveData.GetRemainingMiningAdBonuses(
                 today,
-                UnlimitedMiningAdBonuses);
+                DailyMiningAdBonusLimit);
         }
 
         private static string GetMiningDateKey()
@@ -562,7 +555,10 @@ namespace StarForge.Presentation
 
         private void HandleEnhanceClicked()
         {
-            if (isResolving)
+            // Ignore enhance taps while a guidance popup (result / fracture /
+            // black hole guide / revive) is open. Those popups don't cover the button, so rapid tapping
+            // could otherwise blow past a freshly discovered black hole unseen.
+            if (isResolving || hudView.IsBlockingOverlayOpen)
             {
                 return;
             }
@@ -570,11 +566,14 @@ namespace StarForge.Presentation
             StarForgeAttemptPreview preview = enhancementService.GetPreview(saveData, balance, selectedCurrency);
             if (!preview.isAvailable || preview.isMaxLevel || !preview.hasEnoughCurrency)
             {
+                // Blocked attempt (unavailable / max / not enough currency): resolve the
+                // message without ever rolling a free black hole discovery.
                 StarForgeEnhancementResult result = enhancementService.TryEnhance(
                     saveData,
                     balance,
                     selectedCurrency,
-                    () => Random.value);
+                    () => Random.value,
+                    false);
 
                 hudView.ShowResult(result);
                 RefreshViews();
@@ -589,11 +588,20 @@ namespace StarForge.Presentation
             isResolving = true;
             RefreshViews();
 
-            int attemptLevel = saveData.currentLevel;
-            if (saveData.enhancementAnimationSkipEnabled)
+            int attemptLevel = GetEnhancementEffectLevel();
+            // Black hole moments (enhancing/destruction of an existing black hole, or a black
+            // hole discovery) always play their cinematic, even when the enhancement-
+            // animation skip is on. Discovery is random, so pre-roll the decision here
+            // and feed it to TryEnhance so the skip choice matches the actual outcome.
+            bool willDiscoverBlackHole =
+                enhancementService.WouldDiscoverBlackHole(
+                    saveData, balance, Random.value);
+            bool forceBlackHoleCinematic =
+                saveData.isBlackHole || willDiscoverBlackHole;
+            if (saveData.enhancementAnimationSkipEnabled && !forceBlackHoleCinematic)
             {
                 yield return null;
-                ResolveEnhancementWithoutAnimation(attemptLevel);
+                ResolveEnhancementWithoutAnimation(attemptLevel, false);
                 yield break;
             }
 
@@ -601,7 +609,11 @@ namespace StarForge.Presentation
             float chargeDuration = audioController.GetChargeDuration(attemptLevel, fallbackChargeDuration);
             int shardCount = Mathf.Clamp(10 + attemptLevel + Mathf.RoundToInt(chargeDuration * 6f), 12, 64);
             float effectIntensity = 1f + attemptLevel * 0.045f;
-            bool useHighTierSuccessTransition = attemptLevel == 28 || attemptLevel == 29;
+            bool useHighTierSuccessTransition =
+                saveData.isBlackHole ||
+                willDiscoverBlackHole ||
+                attemptLevel == 28 ||
+                attemptLevel == 29;
 
             Transform planetTarget = planetView.Target;
             audioController.PlayCharge(attemptLevel);
@@ -611,6 +623,7 @@ namespace StarForge.Presentation
             StartCameraMove(GetRestCameraZ(attemptLevel) * 0.62f, Mathf.Min(0.45f, chargeDuration));
 
             StarForgeEnhancementResult result;
+            StarForgeAchievementUnlock[] unlockedAchievements;
             bool resultAudioPlayedEarly = false;
 
             if (useHighTierSuccessTransition)
@@ -633,7 +646,10 @@ namespace StarForge.Presentation
                     saveData,
                     balance,
                     selectedCurrency,
-                    () => Random.value);
+                    () => Random.value,
+                    willDiscoverBlackHole);
+                unlockedAchievements =
+                    achievementService.CompleteAvailable(saveData);
 
                 if (result.kind == StarForgeResultKind.Success ||
                     result.kind == StarForgeResultKind.GreatSuccess)
@@ -663,7 +679,10 @@ namespace StarForge.Presentation
                     saveData,
                     balance,
                     selectedCurrency,
-                    () => Random.value);
+                    () => Random.value,
+                    willDiscoverBlackHole);
+                unlockedAchievements =
+                    achievementService.CompleteAvailable(saveData);
                 saveRepository.Save(saveData);
             }
 
@@ -674,12 +693,14 @@ namespace StarForge.Presentation
                 result.kind == StarForgeResultKind.Success ||
                 result.kind == StarForgeResultKind.GreatSuccess;
 
+            SyncCameraOrbitDefaultForCurrentState();
+
             if (useHighTierSuccessTransition && isSuccess)
             {
-                StartCameraMove(GetRestCameraZ(saveData.currentLevel), 1f);
+                StartCameraMove(GetRestCameraZForCurrentState(), 1f);
                 Coroutine cameraReaction = null;
                 yield return planetView.PlayHighTierSuccessTransition(
-                    balance.GetStage(saveData.currentLevel),
+                    GetCurrentVisualStage(),
                     1f,
                     () =>
                     {
@@ -710,16 +731,16 @@ namespace StarForge.Presentation
                     Handheld.Vibrate();
                 }
 
-                StartCameraMove(GetRestCameraZ(saveData.currentLevel), 0.85f);
+                StartCameraMove(GetRestCameraZForCurrentState(), 0.85f);
                 yield return planetView.PlaySuccessGrowth(
-                    balance.GetStage(saveData.currentLevel),
+                    GetCurrentVisualStage(),
                     result.levelGain);
             }
             else
             {
                 // 실패/균열/소멸: 행성은 그대로(또는 0강), 카메라만 제자리로 줌 아웃
-                planetView.ApplyStage(balance.GetStage(saveData.currentLevel));
-                StartCameraMove(GetRestCameraZ(saveData.currentLevel), 0.5f);
+                ApplyPlanetVisual();
+                StartCameraMove(GetRestCameraZForCurrentState(), 0.5f);
 
                 if (!resultAudioPlayedEarly)
                 {
@@ -739,29 +760,64 @@ namespace StarForge.Presentation
                 yield return PlayCameraReaction(result.kind);
             }
 
+            if (isSuccess &&
+                (result.isBlackHole || result.discoveredBlackHole) &&
+                saveData.isBlackHole)
+            {
+                planetView.ApplyBlackHoleStage(saveData.blackHoleLevel);
+            }
+
             if (result.kind == StarForgeResultKind.Destroyed)
             {
-                lastDestroyedLevel = result.previousLevel;
-                pendingDestroyedResult = result;
-                hudView.ShowReviveOverlay(result, saveData);
+                if (result.isBlackHole)
+                {
+                    lastDestroyedLevel = 0;
+                    pendingDestroyedResult = null;
+                    hudView.ShowResult(result);
+                }
+                else
+                {
+                    lastDestroyedLevel = result.previousLevel;
+                    pendingDestroyedResult = result;
+                    hudView.ShowReviveOverlay(result, saveData);
+                    hudView.SetReviveAdCooldown(GetReviveAdCooldownRemaining());
+                }
             }
             else if (result.kind == StarForgeResultKind.Fracture)
             {
-                hudView.ShowResult(result);
+                if (!saveData.fractureAlertMuted)
+                {
+                    hudView.ShowResult(result);
+                }
+            }
+            else if (result.discoveredBlackHole)
+            {
+                hudView.ShowMessage(
+                    "블랙홀 발견",
+                    "당신은 블랙홀을 발견했습니다.\n\n" +
+                    "블랙홀은 등급이 높아질수록\n" +
+                    "분해 시 훨씬 많은 보상을 지급하지만,\n" +
+                    "소멸 시에는 아무런 보상도 획득할 수 없습니다.");
             }
 
             isResolving = false;
             RefreshViews();
+            ShowAchievementOverlays(unlockedAchievements);
         }
 
-        private void ResolveEnhancementWithoutAnimation(int attemptLevel)
+        private void ResolveEnhancementWithoutAnimation(
+            int attemptLevel,
+            bool overrideDiscovery)
         {
             StarForgeEnhancementResult result =
                 enhancementService.TryEnhance(
                     saveData,
                     balance,
                     selectedCurrency,
-                    () => Random.value);
+                    () => Random.value,
+                    overrideDiscovery);
+            StarForgeAchievementUnlock[] unlockedAchievements =
+                achievementService.CompleteAvailable(saveData);
             saveRepository.Save(saveData);
 
             if (cameraMoveRoutine != null)
@@ -772,11 +828,9 @@ namespace StarForge.Presentation
 
             audioController.StopCharge();
             planetView.StopChargePulse();
-            planetView.SetShape(
-                (StarForgePlanetShape)saveData.planetShape);
-            planetView.ApplyStage(
-                balance.GetStage(saveData.currentLevel));
-            SetCameraZ(GetRestCameraZ(saveData.currentLevel));
+            ApplyPlanetVisual();
+            SyncCameraOrbitDefaultForCurrentState();
+            SetCameraZ(GetRestCameraZForCurrentState());
             audioController.PlayResult(result.kind, attemptLevel);
 
             if (saveData.vibrationEnabled &&
@@ -789,17 +843,104 @@ namespace StarForge.Presentation
 
             if (result.kind == StarForgeResultKind.Destroyed)
             {
-                lastDestroyedLevel = result.previousLevel;
-                pendingDestroyedResult = result;
-                hudView.ShowReviveOverlay(result, saveData);
+                if (result.isBlackHole)
+                {
+                    lastDestroyedLevel = 0;
+                    pendingDestroyedResult = null;
+                    hudView.ShowResult(result);
+                }
+                else
+                {
+                    lastDestroyedLevel = result.previousLevel;
+                    pendingDestroyedResult = result;
+                    hudView.ShowReviveOverlay(result, saveData);
+                    hudView.SetReviveAdCooldown(GetReviveAdCooldownRemaining());
+                }
             }
             else if (result.kind == StarForgeResultKind.Fracture)
             {
-                hudView.ShowResult(result);
+                if (!saveData.fractureAlertMuted)
+                {
+                    hudView.ShowResult(result);
+                }
+            }
+            else if (result.discoveredBlackHole)
+            {
+                hudView.ShowMessage(
+                    "블랙홀 발견",
+                    "당신은 블랙홀을 발견했습니다.\n\n" +
+                    "블랙홀은 등급이 높아질수록\n" +
+                    "분해 시 훨씬 많은 보상을 지급하지만,\n" +
+                    "소멸 시에는 아무런 보상도 획득할 수 없습니다.");
             }
 
             isResolving = false;
             RefreshViews();
+            ShowAchievementOverlays(unlockedAchievements);
+        }
+
+        private StarForgeAchievementUnlock[] CompleteAvailableAchievements()
+        {
+            StarForgeAchievementUnlock[] achievements =
+                achievementService.CompleteAvailable(saveData);
+            if (achievements.Length > 0)
+            {
+                saveRepository.Save(saveData);
+            }
+
+            return achievements;
+        }
+
+        private void ShowAchievementOverlays(
+            StarForgeAchievementUnlock[] achievements)
+        {
+            if (achievements != null && !saveData.achievementAlertMuted)
+            {
+                for (int i = 0; i < achievements.Length; i++)
+                {
+                    hudView.ShowAchievementToast(
+                        achievements[i].definition.achievementName,
+                        achievements[i].definition.tooltip);
+                }
+            }
+
+            UpdateAchievementNotification();
+        }
+
+        private void UpdateAchievementNotification()
+        {
+            hudView.SetAchievementClaimable(
+                achievementService.HasClaimableRewards(saveData));
+        }
+
+        private void HandleAchievementClaimRequested(string achievementId)
+        {
+            if (!achievementService.TryClaimReward(saveData, achievementId))
+            {
+                return;
+            }
+
+            saveRepository.Save(saveData);
+            RefreshViews();
+            hudView.RefreshAchievementList();
+            UpdateAchievementNotification();
+        }
+
+        private void HandleAchievementClaimAllRequested()
+        {
+            CurrencyAmount[] claimedRewards =
+                achievementService.GetClaimableRewardTotals(saveData);
+            if (achievementService.ClaimAllRewards(saveData) <= 0)
+            {
+                hudView.ShowMessage("수령할 보상이 없습니다.", string.Empty);
+                return;
+            }
+
+            saveRepository.Save(saveData);
+            RefreshViews();
+            hudView.RefreshAchievementList();
+            UpdateAchievementNotification();
+            hudView.ShowAchievementClaimResult(claimedRewards);
         }
 
         private IEnumerator WaitForDuration(float duration)
@@ -812,10 +953,97 @@ namespace StarForge.Presentation
             }
         }
 
+        private int GetEnhancementEffectLevel()
+        {
+            if (saveData == null)
+            {
+                return 0;
+            }
+
+            return saveData.isBlackHole
+                ? 29
+                : saveData.currentLevel;
+        }
+
+        private StageVisualConfig GetCurrentVisualStage()
+        {
+            return saveData != null && saveData.isBlackHole
+                ? CreateBlackHoleVisualStage(saveData.blackHoleLevel)
+                : balance.GetStage(saveData.currentLevel);
+        }
+
+        private void ApplyPlanetVisual()
+        {
+            if (saveData != null && saveData.isBlackHole)
+            {
+                planetView.SetShape(StarForgePlanetShape.Default);
+                planetView.ApplyBlackHoleStage(saveData.blackHoleLevel);
+                return;
+            }
+
+            planetView.SetShape((StarForgePlanetShape)saveData.planetShape);
+            planetView.ApplyStage(balance.GetStage(saveData.currentLevel));
+        }
+
+        private bool IsBlackHoleCameraState()
+        {
+            return saveData != null && saveData.isBlackHole;
+        }
+
+        private float GetDefaultCameraOrbitPitch()
+        {
+            return IsBlackHoleCameraState()
+                ? BlackHoleDefaultCameraPitch
+                : 0f;
+        }
+
+        private void SyncCameraOrbitDefaultForCurrentState()
+        {
+            bool isBlackHole = IsBlackHoleCameraState();
+            if (cameraOrbitStateIsBlackHole == isBlackHole)
+            {
+                return;
+            }
+
+            cameraOrbitStateIsBlackHole = isBlackHole;
+            cameraOrbitPitch = GetDefaultCameraOrbitPitch();
+            ApplyCameraOrbit(Vector3.zero);
+        }
+
+        private float GetRestCameraZForCurrentState()
+        {
+            return GetRestCameraZ(GetCurrentVisualStage());
+        }
+
         private float GetRestCameraZ(int level)
         {
-            float scale = Mathf.Max(0.4f, balance.GetStage(level).scale);
+            return GetRestCameraZ(balance.GetStage(level));
+        }
+
+        private float GetRestCameraZ(StageVisualConfig stage)
+        {
+            float scale = Mathf.Max(0.4f, stage != null ? stage.scale : 1f);
             return -(6.0f + scale * 1.15f);
+        }
+
+        private static StageVisualConfig CreateBlackHoleVisualStage(
+            int blackHoleLevel)
+        {
+            int clampedLevel = Mathf.Clamp(
+                blackHoleLevel,
+                StarForgeBlackHoleRules.MinLevel,
+                StarForgeBlackHoleRules.MaxLevel);
+            return new StageVisualConfig
+            {
+                level = 30 + clampedLevel,
+                displayName = "블랙홀",
+                color = clampedLevel >= StarForgeBlackHoleRules.MaxLevel
+                    ? "#E8FAFF"
+                    : clampedLevel >= 7 ? "#D8AC52" : "#7656D8",
+                scale = 1.75f + clampedLevel * 0.08f,
+                emission = 2.6f + clampedLevel * 0.12f,
+                rotationSpeed = 22f + clampedLevel * 2f
+            };
         }
 
         private void SetCameraZ(float z)
@@ -973,6 +1201,13 @@ namespace StarForge.Presentation
                 return;
             }
 
+            float cooldownRemaining = GetReviveAdCooldownRemaining();
+            if (cooldownRemaining > 0f)
+            {
+                hudView.SetReviveAdCooldown(cooldownRemaining);
+                return;
+            }
+
             if (!rewardedAdService.IsReady(DestructionKeepPlacement))
             {
                 hudView.SetRewardedReviveButtonState(
@@ -998,6 +1233,9 @@ namespace StarForge.Presentation
                         return;
                     }
 
+                    // A real impression happened; start the 3-minute throttle.
+                    StartReviveAdCooldown();
+
                     StarForgeEnhancementResult destroyedResult =
                         pendingDestroyedResult;
                     StarForgeReviveResult reviveResult =
@@ -1007,9 +1245,8 @@ namespace StarForge.Presentation
                             destroyedResult.rewards);
                     if (!reviveResult.success)
                     {
-                        hudView.SetRewardedReviveButtonState(
-                            true,
-                            "광고 보고 현 단계 유지");
+                        hudView.SetReviveAdCooldown(
+                            GetReviveAdCooldownRemaining());
                         hudView.ShowMessage(
                             "단계 유지 실패",
                             reviveResult.message);
@@ -1037,16 +1274,39 @@ namespace StarForge.Presentation
                 });
         }
 
-        private void HandleAdvertisingPrivacyOptionsRequested()
+        // Remaining seconds before the planet-keep revive ad can be watched again.
+        // Persisted as wall-clock so it survives app restarts (mirrors AdMob's limit).
+        private float GetReviveAdCooldownRemaining()
         {
-            rewardedAdService.ShowPrivacyOptions(completed =>
+            string stored = PlayerPrefs.GetString(ReviveAdCooldownPrefKey, string.Empty);
+            if (string.IsNullOrEmpty(stored) ||
+                !long.TryParse(stored, out long untilBinary))
             {
-                hudView.ShowMessage(
-                    completed ? "광고 개인정보 설정 완료" : "광고 개인정보 설정 불가",
-                    completed
-                        ? "광고 개인정보 선택이 반영되었습니다."
-                        : "현재 제공할 광고 개인정보 선택지가 없습니다.");
-            });
+                return 0f;
+            }
+
+            System.DateTime until;
+            try
+            {
+                until = System.DateTime.FromBinary(untilBinary);
+            }
+            catch (System.ArgumentException)
+            {
+                return 0f;
+            }
+
+            double remaining = (until - System.DateTime.UtcNow).TotalSeconds;
+            return remaining > 0d ? (float)remaining : 0f;
+        }
+
+        private void StartReviveAdCooldown()
+        {
+            System.DateTime until =
+                System.DateTime.UtcNow.AddSeconds(ReviveAdCooldownSeconds);
+            PlayerPrefs.SetString(
+                ReviveAdCooldownPrefKey,
+                until.ToBinary().ToString());
+            PlayerPrefs.Save();
         }
 
         private void HandleResetConfirmed()
@@ -1057,11 +1317,14 @@ namespace StarForge.Presentation
             }
 
             saveData = saveRepository.Reset(balance);
+            StarForgeAchievementUnlock[] achievements =
+                CompleteAvailableAchievements();
             pendingDestroyedResult = null;
             rewardedAdInProgress = false;
             selectedCurrency = StarForgeCurrencyType.MeteorFragment;
             RefreshViews();
             StartCameraMove(GetRestCameraZ(saveData.currentLevel), 0.6f);
+            ShowAchievementOverlays(achievements);
         }
 
         private void HandleSoundToggled(bool value)
@@ -1126,6 +1389,18 @@ namespace StarForge.Presentation
             saveRepository.Save(saveData);
         }
 
+        private void HandleFractureAlertMutedToggled(bool value)
+        {
+            saveData.fractureAlertMuted = value;
+            saveRepository.Save(saveData);
+        }
+
+        private void HandleAchievementAlertMutedToggled(bool value)
+        {
+            saveData.achievementAlertMuted = value;
+            saveRepository.Save(saveData);
+        }
+
         private void HandleCameraOrbitDragged(Vector2 dragDelta)
         {
             if (isResolving || targetCamera == null)
@@ -1146,13 +1421,14 @@ namespace StarForge.Presentation
         private void RefreshViews()
         {
             StarForgeAttemptPreview preview = enhancementService.GetPreview(saveData, balance, selectedCurrency);
-            planetView.SetShape((StarForgePlanetShape)saveData.planetShape);
-            planetView.ApplyStage(balance.GetStage(saveData.currentLevel));
+            ApplyPlanetVisual();
+            SyncCameraOrbitDefaultForCurrentState();
             hudView.Refresh(saveData, balance, selectedCurrency, preview, isResolving);
             hudView.SetMiningAttemptsRemaining(
                 GetRemainingMiningPlays(),
                 GetRemainingMiningAdBonuses(),
                 isResolving);
+            UpdateAchievementNotification();
         }
 
         private void HandleDisassembleRequested()
@@ -1173,21 +1449,28 @@ namespace StarForge.Presentation
                 return;
             }
 
+            StarForgeAchievementUnlock[] achievements =
+                achievementService.CompleteAvailable(saveData);
             saveRepository.Save(saveData);
-            audioController.PlayResult(StarForgeResultKind.Destroyed, result.level);
+            int disassembleEffectLevel = result.isBlackHole ? 29 : result.level;
+            audioController.PlayResult(
+                StarForgeResultKind.Destroyed,
+                disassembleEffectLevel);
             effectController.PlayResult(
                 StarForgeResultKind.Destroyed,
                 planetView.Target.position,
-                1f + result.level * 0.035f);
+                1f + disassembleEffectLevel * 0.035f);
 
             RefreshViews();
-            StartCameraMove(GetRestCameraZ(saveData.currentLevel), 0.6f);
+            StartCameraMove(GetRestCameraZForCurrentState(), 0.6f);
 
             hudView.ShowDisassembleResult(
                 result.rewards,
                 balance.GetStageName(
-                    0,
-                    (StarForgePlanetShape)saveData.planetShape));
+                    saveData.currentLevel,
+                    (StarForgePlanetShape)saveData.planetShape),
+                result.isBlackHole);
+            ShowAchievementOverlays(achievements);
         }
 
         private void EnsureRuntimeObjects()
@@ -1296,6 +1579,12 @@ namespace StarForge.Presentation
             keyLight.intensity = 1.35f;
             keyLight.color = Color.white;
             keyLight.transform.rotation = Quaternion.Euler(32f, -28f, 0f);
+            // The collection preview (layer 30) and mining field (layer 29) render on
+            // their own cameras with their own dedicated key lights. This directional
+            // light defaults to lighting Everything, so without excluding those layers
+            // their planets/ship get double directional lighting and look brighter than
+            // the main scene. Keep this light off the isolated layers.
+            keyLight.cullingMask = ~((1 << 29) | (1 << 30));
         }
 
         private void EnsurePlanet()
@@ -1316,7 +1605,8 @@ namespace StarForge.Presentation
         private void InitializeCameraOrbit()
         {
             cameraOrbitYaw = 0f;
-            cameraOrbitPitch = 0f;
+            cameraOrbitPitch = GetDefaultCameraOrbitPitch();
+            cameraOrbitStateIsBlackHole = IsBlackHoleCameraState();
             cameraDistance = targetCamera != null && planetView != null
                 ? Mathf.Max(
                     0.1f,

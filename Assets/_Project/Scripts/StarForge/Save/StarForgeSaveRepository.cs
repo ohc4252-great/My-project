@@ -35,10 +35,56 @@ namespace StarForge.Save
                 (int)StarForgePlanetShape.Cat);
             data.NormalizeFractureProgress();
             data.NormalizeAudioSettings();
+            data.NormalizeAchievementCounters();
             data.EnsureCollectionProgress(balance.maxLevel);
+            // Migration: before manual claiming, rewards were auto-granted on
+            // completion. Treat all already-completed achievements as already claimed
+            // so they don't reappear as claimable after this update.
+            if (data.claimedAchievementIds == null &&
+                data.completedAchievementIds != null)
+            {
+                data.claimedAchievementIds =
+                    (string[])data.completedAchievementIds.Clone();
+            }
+            data.EnsureAchievementProgress();
             data.miningPlayDate = data.miningPlayDate ?? string.Empty;
             data.miningPlayCount = Mathf.Max(0, data.miningPlayCount);
             data.miningAdBonusCount = Mathf.Max(0, data.miningAdBonusCount);
+            data.miningCompletedCount = Mathf.Max(
+                0,
+                data.miningCompletedCount);
+            data.miningCompletionDate =
+                data.miningCompletionDate ?? string.Empty;
+            data.miningDailyCompletedCount = Mathf.Max(
+                0,
+                data.miningDailyCompletedCount);
+            data.bestMiningScorePermyriad = Mathf.Clamp(
+                data.bestMiningScorePermyriad,
+                0,
+                10000);
+            data.highestBlackHoleLevel = Mathf.Clamp(
+                data.highestBlackHoleLevel,
+                0,
+                StarForgeBlackHoleRules.MaxLevel);
+            data.blackHoleDiscoveryAttemptCount = Mathf.Clamp(
+                data.blackHoleDiscoveryAttemptCount,
+                0,
+                StarForgeBlackHoleRules.DiscoveryAttemptThreshold);
+            if (data.isBlackHole)
+            {
+                data.blackHoleLevel = Mathf.Clamp(
+                    data.blackHoleLevel,
+                    StarForgeBlackHoleRules.MinLevel,
+                    StarForgeBlackHoleRules.MaxLevel);
+                data.highestBlackHoleLevel = Mathf.Max(
+                    data.highestBlackHoleLevel,
+                    data.blackHoleLevel);
+            }
+            else
+            {
+                data.blackHoleLevel = 0;
+            }
+
             return data;
         }
 

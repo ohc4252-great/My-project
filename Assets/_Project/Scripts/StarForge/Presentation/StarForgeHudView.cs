@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using StarForge.Core;
 using StarForge.Data;
 using StarForge.Save;
@@ -12,7 +13,12 @@ namespace StarForge.Presentation
 {
     public sealed class StarForgeHudView : MonoBehaviour
     {
+        private const int ChanceTextDefaultFontSize = 28;
+        private const int BlackHoleChanceTextFontSize = 26;
+
         private readonly StarForgeEnhancementService previewService = new StarForgeEnhancementService();
+        private readonly StarForgeAchievementService achievementService =
+            new StarForgeAchievementService();
         private readonly StarForgeMaterialExchangeService exchangeService = new StarForgeMaterialExchangeService();
         public event Action EnhanceClicked;
         public event Action ResetConfirmed;
@@ -23,12 +29,15 @@ namespace StarForge.Presentation
         public event Action<float> SfxVolumeChanged;
         public event Action<bool> VibrationToggled;
         public event Action<bool> EnhancementAnimationSkipToggled;
+        public event Action<bool> FractureAlertMutedToggled;
+        public event Action<bool> AchievementAlertMutedToggled;
         public event Action<Vector2> CameraOrbitDragged;
         public event Action<int> ReviveRequested;
         public event Action RewardedReviveRequested;
-        public event Action AdvertisingPrivacyOptionsRequested;
         public event Action DisassembleRequested;
         public event Action MiningRequested;
+        public event Action<string> AchievementClaimRequested;
+        public event Action AchievementClaimAllRequested;
 
         private readonly Button[] currencyButtons = new Button[5];
         private readonly Text[] currencyButtonTexts = new Text[5];
@@ -51,12 +60,16 @@ namespace StarForge.Presentation
         private Text riskText;
         private Text statusText;
         private Button enhanceButton;
+        private bool lastCanEnhance;
         private GameObject resultPanel;
         private Text resultTitleText;
         private Text resultBodyText;
         private GameObject resultRewardRow;
         private readonly Image[] resultRewardIcons = new Image[5];
         private readonly Text[] resultRewardTexts = new Text[5];
+        private readonly Queue<StarForgeAchievementUnlock>
+            pendingAchievementOverlays =
+                new Queue<StarForgeAchievementUnlock>();
         private GameObject settingsPanel;
         private GameObject resetConfirmPanel;
         private Button disassembleButton;
@@ -73,6 +86,8 @@ namespace StarForge.Presentation
         private Text exchangeQuantityStatusText;
         private InputField exchangeQuantityInput;
         private Button exchangeQuantityConfirmButton;
+        private GameObject exchangeNumpadPanel;
+        private StarForgeSaveData lastSaveData;
         private int pendingExchangeRouteIndex = -1;
         private Button collectionOpenButton;
         private Button miningOpenButton;
@@ -96,12 +111,37 @@ namespace StarForge.Presentation
         private StarForgePlanetShape collectionShape = StarForgePlanetShape.Default;
         private bool collectionSkipEnabled;
         private bool collectionTransitioning;
+        private GameObject collectionDetailRoot;
+        private GameObject collectionBrowseRoot;
+        private GameObject collectionPlanetTabRoot;
+        private GameObject collectionAchievementTabRoot;
+        private RectTransform collectionPlanetGridContent;
+        private RectTransform collectionAchievementContent;
+        private Button collectionPlanetTabButton;
+        private Button collectionAchievementTabButton;
+        private readonly Button[] collectionBrowseShapeButtons = new Button[3];
+        private Text collectionAchievementProgressText;
+        private Button achievementClaimAllButton;
+        private GameObject collectionClaimBadge;
+        private GameObject collectionAchievementClaimBadge;
+        private GameObject achievementToast;
+        private CanvasGroup achievementToastGroup;
+        private Image achievementToastIcon;
+        private Text achievementToastNameText;
+        private Text achievementToastFlavorText;
+        private readonly Queue<(string name, string flavor)> achievementToastQueue =
+            new Queue<(string name, string flavor)>();
+        private Coroutine achievementToastRoutine;
+        private Sprite collectionPlanetSprite;
+        private StarForgePlanetShape collectionBrowseShape = StarForgePlanetShape.Default;
         private Toggle soundToggle;
         private Slider bgmVolumeSlider;
         private Text bgmVolumeValueText;
         private Slider sfxVolumeSlider;
         private Text sfxVolumeValueText;
         private Toggle vibrationToggle;
+        private Toggle fractureAlertToggle;
+        private Toggle achievementAlertToggle;
         private StarForgeBalance balanceRef;
         private CanvasGroup mainHudCanvasGroup;
         private Coroutine mainHudFadeRoutine;
@@ -112,6 +152,7 @@ namespace StarForge.Presentation
         private int reviveDestroyedLevel;
         private Button rewardedReviveButton;
         private Text rewardedReviveButtonText;
+        private Coroutine reviveAdCooldownRoutine;
         private bool isBuilt;
         private Sprite chamferedUiSprite;
         private RawImage spaceBackdropImage;
@@ -170,6 +211,8 @@ namespace StarForge.Presentation
             BuildExchangePanel(safeAreaRoot);
             BuildCollectionPanel(safeAreaRoot, balance);
             BuildRevivePanel(safeAreaRoot, balance);
+            BuildCollectionClaimBadge(mainHudRoot);
+            BuildAchievementToast(safeAreaRoot);
             isBuilt = true;
         }
 
@@ -180,27 +223,61 @@ namespace StarForge.Presentation
             StarForgeAttemptPreview preview,
             bool isBusy)
         {
-            StageVisualConfig stage = balance.GetStage(saveData.currentLevel);
+            lastSaveData = saveData;
             CurrencyConfig selectedConfig = balance.GetCurrency(selectedCurrency);
             StarForgePlanetShape shape = (StarForgePlanetShape)saveData.planetShape;
-            string stageName = balance.GetStageName(saveData.currentLevel, shape);
+            bool isBlackHole = saveData.isBlackHole;
+            string stageName = isBlackHole
+                ? "블랙홀"
+                : balance.GetStageName(saveData.currentLevel, shape);
+            int displayLevel = isBlackHole
+                ? saveData.blackHoleLevel
+                : saveData.currentLevel;
 
-            levelText.text = saveData.currentLevel + "강  " + stageName;
-            levelText.color = GetLevelTextColor(saveData.currentLevel);
+            levelText.text = displayLevel + "강  " + stageName;
+            levelText.color = isBlackHole
+                ? new Color(0.9f, 0.82f, 1f, 1f)
+                : GetLevelTextColor(saveData.currentLevel);
             if (levelTextOutline != null)
             {
-                levelTextOutline.effectColor = GetLevelOutlineColor(saveData.currentLevel);
+                levelTextOutline.effectColor = isBlackHole
+                    ? new Color(0.3f, 0.05f, 0.65f, 0.95f)
+                    : GetLevelOutlineColor(saveData.currentLevel);
             }
 
-            highestText.text = "획득 기록 " + saveData.highestLevel + "강";
-            selectedMaterialText.text = selectedConfig.displayName;
+            highestText.text = isBlackHole
+                ? "블랙홀 기록 " + saveData.highestBlackHoleLevel + "강"
+                : "획득 기록 " + saveData.highestLevel + "강";
+            selectedMaterialText.text = isBlackHole
+                ? "재료 없음"
+                : selectedConfig.displayName;
             if (selectedMaterialIconImage != null)
             {
                 selectedMaterialIconImage.sprite = GetMaterialIcon((int)selectedCurrency);
-                selectedMaterialIconImage.color = preview.isAvailable ? Color.white : new Color(1f, 1f, 1f, 0.38f);
+                selectedMaterialIconImage.color = isBlackHole
+                    ? new Color(0.72f, 0.62f, 1f, 0.45f)
+                    : preview.isAvailable ? Color.white : new Color(1f, 1f, 1f, 0.38f);
             }
 
-            if (preview.isMaxLevel)
+            chanceText.fontSize = isBlackHole
+                ? BlackHoleChanceTextFontSize
+                : ChanceTextDefaultFontSize;
+
+            if (isBlackHole && preview.isMaxLevel)
+            {
+                chanceText.text =
+                    "<color=#B78CFF>강화 확률 :</color> <color=#FFD56A>MAX</color>";
+                riskText.text =
+                    "<color=#C7D5EA>최대 등급 블랙홀입니다.</color>";
+            }
+            else if (isBlackHole)
+            {
+                chanceText.text =
+                    "<color=#B78CFF>강화 확률 :</color> <color=#FFD56A>???</color>";
+                riskText.text =
+                    "<color=#C7D5EA>실패 시</color>   <color=#FF6672>반드시 소멸</color>";
+            }
+            else if (preview.isMaxLevel)
             {
                 chanceText.text =
                     "<color=#5EBBFF>성공 확률</color>   <color=#FFD56A>MAX</color>";
@@ -226,7 +303,9 @@ namespace StarForge.Presentation
                     "</color> <color=#C7D5EA>확률로 소멸</color>";
             }
 
-            statusText.text = saveData.fractureCount > 0
+            statusText.text = isBlackHole
+                ? "<color=#C7D5EA>상태</color>   <color=#B78CFF>블랙홀</color>"
+                : saveData.fractureCount > 0
                 ? "<color=#C7D5EA>상태</color>   <color=#FF6672>균열 " +
                   saveData.fractureCount +
                   "회</color>"
@@ -234,7 +313,8 @@ namespace StarForge.Presentation
             statusText.color = Color.white;
 
             bool canEnhance = !isBusy && preview.isAvailable && preview.hasEnoughCurrency && !preview.isMaxLevel;
-            enhanceButton.interactable = canEnhance;
+            lastCanEnhance = canEnhance;
+            UpdateEnhanceButtonInteractable();
             SetSpaceBackdropExpanded(isBusy);
             SetMainHudVisible(!isBusy);
 
@@ -243,12 +323,12 @@ namespace StarForge.Presentation
                 CurrencyAmount[] disassembleReward =
                     previewService.GetDisassembleRewards(saveData, balance);
                 bool canDisassemble = !isBusy &&
-                    saveData.currentLevel > 0 &&
+                    (isBlackHole || saveData.currentLevel > 0) &&
                     disassembleReward != null &&
                     disassembleReward.Length > 0;
                 disassembleButton.interactable = canDisassemble;
                 pendingDisassembleSummary = BuildDisassembleSummary(
-                    saveData.currentLevel,
+                    displayLevel,
                     stageName,
                     disassembleReward);
             }
@@ -274,7 +354,7 @@ namespace StarForge.Presentation
 
                 StarForgeAttemptPreview currencyPreview = previewService.GetPreview(saveData, balance, currencyType);
                 bool isSelected = selectedCurrency == currencyType;
-                button.interactable = !isBusy;
+                button.interactable = !isBusy && !isBlackHole;
                 Color slotColor = isSelected
                     ? Color.white
                     : new Color(0.78f, 0.88f, 1f, 0.9f);
@@ -286,10 +366,14 @@ namespace StarForge.Presentation
                 button.colors = slotColors;
                 button.image.color = slotColor;
 
-                Color contentColor = currencyPreview.isAvailable
+                Color contentColor = isBlackHole
+                    ? new Color(0.54f, 0.56f, 0.68f, 1f)
+                    : currencyPreview.isAvailable
                     ? new Color(0.88f, 0.95f, 1f, 1f)
                     : new Color(0.42f, 0.48f, 0.58f, 1f);
-                Color quantityColor = !currencyPreview.isAvailable
+                Color quantityColor = isBlackHole
+                    ? new Color(0.54f, 0.56f, 0.68f, 1f)
+                    : !currencyPreview.isAvailable
                     ? new Color(0.42f, 0.48f, 0.58f, 1f)
                     : currencyPreview.hasEnoughCurrency
                         ? new Color(0.36f, 0.86f, 1f, 1f)
@@ -298,7 +382,9 @@ namespace StarForge.Presentation
                 text.color = contentColor;
                 quantityText.text = "x" + StarForgeFormat.Number(saveData.GetCurrency(currencyType));
                 quantityText.color = quantityColor;
-                icon.color = currencyPreview.isAvailable ? Color.white : new Color(1f, 1f, 1f, 0.38f);
+                icon.color = isBlackHole
+                    ? new Color(1f, 1f, 1f, 0.32f)
+                    : currencyPreview.isAvailable ? Color.white : new Color(1f, 1f, 1f, 0.38f);
             }
 
             if (soundToggle != null)
@@ -329,6 +415,17 @@ namespace StarForge.Presentation
                 vibrationToggle.SetIsOnWithoutNotify(saveData.vibrationEnabled);
             }
 
+            if (achievementAlertToggle != null)
+            {
+                achievementAlertToggle.SetIsOnWithoutNotify(
+                    saveData.achievementAlertMuted);
+            }
+
+            if (fractureAlertToggle != null)
+            {
+                fractureAlertToggle.SetIsOnWithoutNotify(saveData.fractureAlertMuted);
+            }
+
             if (enhancementAnimationSkipToggle != null)
             {
                 enhancementAnimationSkipToggle.SetIsOnWithoutNotify(
@@ -357,10 +454,10 @@ namespace StarForge.Presentation
             if (miningOpenButtonText != null)
             {
                 miningOpenButtonText.text = clampedRemaining > 0
-                    ? "별 채굴하기\n오늘 " + clampedRemaining + "회"
+                    ? "별 탐사하기\n오늘 " + clampedRemaining + "회"
                     : canWatchAd
-                        ? "별 채굴하기\n광고 추가 탐험"
-                        : "별 채굴하기\n오늘 완료";
+                        ? "별 탐사하기\n광고 추가 탐험"
+                        : "별 탐사하기\n오늘 완료";
             }
         }
 
@@ -383,6 +480,27 @@ namespace StarForge.Presentation
 
         }
 
+        // True while a modal guidance popup (result / 균열 / 블랙홀 안내 / 부활) is up.
+        // These popups don't cover the enhance button, so enhancing must be blocked
+        // until the player dismisses them.
+        public bool IsBlockingOverlayOpen
+        {
+            get
+            {
+                return (resultPanel != null && resultPanel.activeSelf) ||
+                       (revivePanel != null && revivePanel.activeSelf);
+            }
+        }
+
+        private void UpdateEnhanceButtonInteractable()
+        {
+            if (enhanceButton != null)
+            {
+                enhanceButton.interactable =
+                    lastCanEnhance && !IsBlockingOverlayOpen;
+            }
+        }
+
         public void ShowResult(StarForgeEnhancementResult result)
         {
             if (resultPanel == null)
@@ -392,13 +510,15 @@ namespace StarForge.Presentation
 
             resultPanel.SetActive(true);
             SetResultRewards(null);
-            resultTitleText.text = GetResultTitle(result.kind);
+            resultTitleText.text = GetResultTitle(result);
             resultBodyText.text = BuildResultBody(result);
+            UpdateEnhanceButtonInteractable();
         }
 
         public void ShowDisassembleResult(
             CurrencyAmount[] rewards,
-            string newStageName)
+            string newStageName,
+            bool isBlackHole = false)
         {
             if (resultPanel == null)
             {
@@ -406,10 +526,28 @@ namespace StarForge.Presentation
             }
 
             resultPanel.SetActive(true);
-            resultTitleText.text = "행성 분해 완료";
+            resultTitleText.text = isBlackHole
+                ? "블랙홀 분해 완료"
+                : "행성 분해 완료";
             resultBodyText.text =
                 "획득 재화\n\n새 행성 : " + newStageName;
             SetResultRewards(rewards);
+            UpdateEnhanceButtonInteractable();
+        }
+
+        public void ShowAchievementClaimResult(CurrencyAmount[] rewards)
+        {
+            if (resultPanel == null)
+            {
+                return;
+            }
+
+            resultPanel.SetActive(true);
+            resultPanel.transform.SetAsLastSibling();
+            resultTitleText.text = "수령 완료";
+            resultBodyText.text = "획득 보상";
+            SetResultRewards(rewards, "x");
+            UpdateEnhanceButtonInteractable();
         }
 
         public void ShowExchangeResult(StarForgeMaterialExchangeResult result)
@@ -757,11 +895,11 @@ namespace StarForge.Presentation
 
         private void BuildSettingsButton(RectTransform root)
         {
-            miningOpenButton = CreateButton("별 채굴하기\n오늘 3회", 20, root);
+            miningOpenButton = CreateButton("별 탐사하기\n오늘 3회", 20, root);
             miningOpenButtonText = miningOpenButton.GetComponentInChildren<Text>();
             RectTransform miningRect = miningOpenButton.GetComponent<RectTransform>();
             miningRect.anchorMin = new Vector2(0.03f, 0.895f);
-            miningRect.anchorMax = new Vector2(0.335f, 0.965f);
+            miningRect.anchorMax = new Vector2(0.254f, 0.965f);
             miningRect.offsetMin = Vector2.zero;
             miningRect.offsetMax = Vector2.zero;
             ApplyCanvasButtonStyle(
@@ -777,8 +915,8 @@ namespace StarForge.Presentation
 
             exchangeOpenButton = CreateButton("재료 교환", 20, root);
             RectTransform exchangeRect = exchangeOpenButton.GetComponent<RectTransform>();
-            exchangeRect.anchorMin = new Vector2(0.35f, 0.895f);
-            exchangeRect.anchorMax = new Vector2(0.565f, 0.965f);
+            exchangeRect.anchorMin = new Vector2(0.269f, 0.895f);
+            exchangeRect.anchorMax = new Vector2(0.492f, 0.965f);
             exchangeRect.offsetMin = Vector2.zero;
             exchangeRect.offsetMax = Vector2.zero;
             ApplyCanvasButtonStyle(
@@ -790,8 +928,8 @@ namespace StarForge.Presentation
 
             collectionOpenButton = CreateButton("도감", 20, root);
             RectTransform collectionRect = collectionOpenButton.GetComponent<RectTransform>();
-            collectionRect.anchorMin = new Vector2(0.58f, 0.895f);
-            collectionRect.anchorMax = new Vector2(0.765f, 0.965f);
+            collectionRect.anchorMin = new Vector2(0.508f, 0.895f);
+            collectionRect.anchorMax = new Vector2(0.731f, 0.965f);
             collectionRect.offsetMin = Vector2.zero;
             collectionRect.offsetMax = Vector2.zero;
             ApplyCanvasButtonStyle(
@@ -803,7 +941,7 @@ namespace StarForge.Presentation
 
             Button settingsButton = CreateButton("설정", 20, root);
             RectTransform rect = settingsButton.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.78f, 0.895f);
+            rect.anchorMin = new Vector2(0.746f, 0.895f);
             rect.anchorMax = new Vector2(0.97f, 0.965f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
@@ -916,7 +1054,7 @@ namespace StarForge.Presentation
 
             chanceText = CreateText(
                 "성공 확률   100%",
-                28,
+                ChanceTextDefaultFontSize,
                 FontStyle.Bold,
                 TextAnchor.MiddleLeft,
                 chanceColumn.transform);
@@ -938,6 +1076,9 @@ namespace StarForge.Presentation
             chanceText.color = new Color(1f, 0.83f, 0.42f, 1f);
             riskText.color = new Color(0.88f, 0.93f, 1f, 1f);
             statusText.color = new Color(0.3f, 0.88f, 0.58f, 1f);
+            // Allow the chance line to shrink further so longer text always fits
+            // on one line without clipping.
+            chanceText.resizeTextMinSize = 9;
             SetPreferredHeight(chanceText, 36f);
             SetPreferredHeight(riskText, 32f);
             SetPreferredHeight(statusText, 32f);
@@ -1025,8 +1166,8 @@ namespace StarForge.Presentation
                 root,
                 new Color(0.008f, 0.025f, 0.055f, 0.99f));
             RectTransform rect = resultPanel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.09f, 0.335f);
-            rect.anchorMax = new Vector2(0.91f, 0.7f);
+            rect.anchorMin = new Vector2(0.055f, 0.275f);
+            rect.anchorMax = new Vector2(0.945f, 0.745f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
             ApplyCanvasFrame(
@@ -1088,10 +1229,13 @@ namespace StarForge.Presentation
                 TextAnchor.MiddleCenter,
                 resultPanel.transform);
             resultBodyText.color = new Color(0.84f, 0.9f, 0.98f, 1f);
+            resultBodyText.horizontalOverflow = HorizontalWrapMode.Wrap;
+            resultBodyText.verticalOverflow = VerticalWrapMode.Truncate;
+            resultBodyText.lineSpacing = 1.05f;
             resultBodyText.resizeTextForBestFit = true;
-            resultBodyText.resizeTextMinSize = 18;
-            resultBodyText.resizeTextMaxSize = 27;
-            SetPreferredHeight(resultBodyText, 122f);
+            resultBodyText.resizeTextMinSize = 16;
+            resultBodyText.resizeTextMaxSize = 25;
+            SetPreferredHeight(resultBodyText, 220f);
 
             resultRewardRow = CreatePanel(
                 "Result Reward Row",
@@ -1104,11 +1248,11 @@ namespace StarForge.Presentation
                 1.25f);
             LayoutElement rewardRowLayout =
                 resultRewardRow.AddComponent<LayoutElement>();
-            rewardRowLayout.minHeight = 76f;
-            rewardRowLayout.preferredHeight = 76f;
+            rewardRowLayout.minHeight = 28f;
+            rewardRowLayout.preferredHeight = 28f;
             HorizontalLayoutGroup rewardLayout =
                 resultRewardRow.AddComponent<HorizontalLayoutGroup>();
-            rewardLayout.padding = new RectOffset(12, 12, 8, 8);
+            rewardLayout.padding = new RectOffset(12, 12, 2, 2);
             rewardLayout.spacing = 8f;
             rewardLayout.childAlignment = TextAnchor.MiddleCenter;
             rewardLayout.childControlWidth = true;
@@ -1129,7 +1273,7 @@ namespace StarForge.Presentation
                     1f);
                 HorizontalLayoutGroup slotLayout =
                     rewardSlot.AddComponent<HorizontalLayoutGroup>();
-                slotLayout.padding = new RectOffset(5, 5, 4, 4);
+                slotLayout.padding = new RectOffset(5, 5, 1, 1);
                 slotLayout.spacing = 3f;
                 slotLayout.childAlignment = TextAnchor.MiddleCenter;
                 slotLayout.childControlWidth = true;
@@ -1145,23 +1289,23 @@ namespace StarForge.Presentation
                 iconObject.transform.SetParent(rewardSlot.transform, false);
                 LayoutElement iconLayout =
                     iconObject.GetComponent<LayoutElement>();
-                iconLayout.minWidth = 38f;
-                iconLayout.preferredWidth = 38f;
-                iconLayout.minHeight = 38f;
-                iconLayout.preferredHeight = 38f;
+                iconLayout.minWidth = 55f;
+                iconLayout.preferredWidth = 55f;
+                iconLayout.minHeight = 55f;
+                iconLayout.preferredHeight = 55f;
                 Image icon = iconObject.GetComponent<Image>();
                 icon.preserveAspect = true;
                 resultRewardIcons[i] = icon;
 
                 Text amount = CreateText(
                     "+0",
-                    18,
+                    25,
                     FontStyle.Bold,
                     TextAnchor.MiddleLeft,
                     rewardSlot.transform);
                 amount.resizeTextForBestFit = true;
-                amount.resizeTextMinSize = 12;
-                amount.resizeTextMaxSize = 18;
+                amount.resizeTextMinSize = 16;
+                amount.resizeTextMaxSize = 25;
                 amount.color = new Color(1f, 0.76f, 0.3f, 1f);
                 resultRewardTexts[i] = amount;
             }
@@ -1180,9 +1324,34 @@ namespace StarForge.Presentation
                 new Color(0.025f, 0.1f, 0.2f, 1f),
                 new Color(0.08f, 0.55f, 0.94f, 1f),
                 new Color(0.94f, 0.98f, 1f, 1f));
-            closeButton.onClick.AddListener(() => resultPanel.SetActive(false));
+            closeButton.onClick.AddListener(CloseResultPanel);
 
             resultPanel.SetActive(false);
+        }
+
+        private Text CreateSettingsSectionLabel(string text, Transform parent)
+        {
+            Text label = CreateText(
+                text,
+                16,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                parent);
+            label.color = new Color(0.52f, 0.68f, 0.9f, 1f);
+            SetPreferredHeight(label, 26f);
+            return label;
+        }
+
+        private void CreateSettingsDivider(Transform parent)
+        {
+            GameObject line = CreatePanel(
+                "Divider",
+                parent,
+                new Color(0.16f, 0.34f, 0.58f, 0.45f));
+            line.GetComponent<Image>().raycastTarget = false;
+            LayoutElement layoutElement = line.AddComponent<LayoutElement>();
+            layoutElement.minHeight = 2f;
+            layoutElement.preferredHeight = 2f;
         }
 
         private void BuildSettingsPanel(RectTransform root)
@@ -1211,9 +1380,11 @@ namespace StarForge.Presentation
             layout.childForceExpandWidth = true;
             layout.childForceExpandHeight = false;
 
-            Text settingsTitle = CreateText("설정", 36, FontStyle.Bold, TextAnchor.MiddleCenter, settingsPanel.transform);
+            Text settingsTitle = CreateText("설정", 34, FontStyle.Bold, TextAnchor.MiddleCenter, settingsPanel.transform);
             settingsTitle.color = new Color(0.95f, 0.98f, 1f, 1f);
-            SetPreferredHeight(settingsTitle, 46f);
+            SetPreferredHeight(settingsTitle, 44f);
+
+            CreateSettingsSectionLabel("오디오", settingsPanel.transform);
             soundToggle = CreateToggle("전체 사운드", settingsPanel.transform);
             soundToggle.onValueChanged.AddListener(value => SoundToggled?.Invoke(value));
             bgmVolumeSlider = CreateVolumeSlider(
@@ -1234,63 +1405,63 @@ namespace StarForge.Presentation
                 UpdateVolumeValueText(sfxVolumeValueText, value);
                 SfxVolumeChanged?.Invoke(value);
             });
+
+            CreateSettingsDivider(settingsPanel.transform);
+            CreateSettingsSectionLabel("게임플레이", settingsPanel.transform);
             vibrationToggle = CreateToggle("진동", settingsPanel.transform);
             vibrationToggle.onValueChanged.AddListener(value => VibrationToggled?.Invoke(value));
+            fractureAlertToggle = CreateToggle("균열 알림 끄기", settingsPanel.transform);
+            fractureAlertToggle.onValueChanged.AddListener(
+                value => FractureAlertMutedToggled?.Invoke(value));
 
+            achievementAlertToggle = CreateToggle("업적 알림 끄기", settingsPanel.transform);
+            achievementAlertToggle.onValueChanged.AddListener(
+                value => AchievementAlertMutedToggled?.Invoke(value));
+
+            CreateSettingsDivider(settingsPanel.transform);
+            CreateSettingsSectionLabel("약관", settingsPanel.transform);
+            // Fixed-height row (matches the toggle rows). Buttons are anchored into
+            // halves and ignore layout so a nested layout group can't stretch them.
             GameObject policyRow = new GameObject(
                 "Policy Links",
                 typeof(RectTransform),
-                typeof(VerticalLayoutGroup),
                 typeof(LayoutElement));
             policyRow.transform.SetParent(settingsPanel.transform, false);
-            VerticalLayoutGroup policyLayout =
-                policyRow.GetComponent<VerticalLayoutGroup>();
-            policyLayout.spacing = 8f;
-            policyLayout.childAlignment = TextAnchor.MiddleCenter;
-            policyLayout.childControlWidth = true;
-            policyLayout.childForceExpandWidth = true;
-            policyLayout.childControlHeight = true;
-            policyLayout.childForceExpandHeight = false;
-            LayoutElement policyRowLayout =
-                policyRow.GetComponent<LayoutElement>();
-            policyRowLayout.minHeight = 148f;
-            policyRowLayout.preferredHeight = 150f;
+            LayoutElement policyRowLayout = policyRow.GetComponent<LayoutElement>();
+            policyRowLayout.minHeight = 58f;
+            policyRowLayout.preferredHeight = 58f;
+            policyRowLayout.flexibleHeight = 0f;
+            policyRowLayout.flexibleWidth = 1f;
 
             Button privacyButton = CreateButton(
                 "개인정보처리방침",
-                18,
+                16,
                 policyRow.transform);
-            LayoutElement privacyLayout =
-                privacyButton.GetComponent<LayoutElement>();
-            privacyLayout.minHeight = 42f;
-            privacyLayout.preferredHeight = 44f;
+            RectTransform privacyRect = privacyButton.GetComponent<RectTransform>();
+            privacyRect.anchorMin = new Vector2(0f, 0f);
+            privacyRect.anchorMax = new Vector2(0.49f, 1f);
+            privacyRect.offsetMin = Vector2.zero;
+            privacyRect.offsetMax = Vector2.zero;
+            privacyButton.GetComponent<LayoutElement>().ignoreLayout = true;
             privacyButton.onClick.AddListener(
                 StarForgeLegal.OpenPrivacyPolicy);
 
             Button termsButton = CreateButton(
                 "이용약관",
-                18,
+                16,
                 policyRow.transform);
-            LayoutElement termsLayout =
-                termsButton.GetComponent<LayoutElement>();
-            termsLayout.minHeight = 42f;
-            termsLayout.preferredHeight = 44f;
+            RectTransform termsRect = termsButton.GetComponent<RectTransform>();
+            termsRect.anchorMin = new Vector2(0.51f, 0f);
+            termsRect.anchorMax = new Vector2(1f, 1f);
+            termsRect.offsetMin = Vector2.zero;
+            termsRect.offsetMax = Vector2.zero;
+            termsButton.GetComponent<LayoutElement>().ignoreLayout = true;
             termsButton.onClick.AddListener(
                 StarForgeLegal.OpenTermsOfService);
 
-            Button advertisingPrivacyOptionsButton = CreateButton(
-                "광고 개인정보 설정",
-                18,
-                policyRow.transform);
-            LayoutElement advertisingPrivacyOptionsLayout =
-                advertisingPrivacyOptionsButton.GetComponent<LayoutElement>();
-            advertisingPrivacyOptionsLayout.minHeight = 42f;
-            advertisingPrivacyOptionsLayout.preferredHeight = 44f;
-            advertisingPrivacyOptionsButton.onClick.AddListener(
-                () => AdvertisingPrivacyOptionsRequested?.Invoke());
-
-            Button resetButton = CreateButton("데이터 초기화", 28, settingsPanel.transform);
-            resetButton.GetComponent<LayoutElement>().preferredHeight = 58f;
+            CreateSettingsDivider(settingsPanel.transform);
+            Button resetButton = CreateButton("데이터 초기화", 26, settingsPanel.transform);
+            resetButton.GetComponent<LayoutElement>().preferredHeight = 56f;
             ApplyCanvasButtonStyle(
                 resetButton,
                 new Color(0.22f, 0.025f, 0.035f, 1f),
@@ -1298,8 +1469,8 @@ namespace StarForge.Presentation
                 new Color(1f, 0.46f, 0.48f, 1f));
             resetButton.onClick.AddListener(() => resetConfirmPanel.SetActive(true));
 
-            Button closeButton = CreateButton("닫기", 28, settingsPanel.transform);
-            closeButton.GetComponent<LayoutElement>().preferredHeight = 58f;
+            Button closeButton = CreateButton("닫기", 26, settingsPanel.transform);
+            closeButton.GetComponent<LayoutElement>().preferredHeight = 56f;
             ApplyCanvasButtonStyle(
                 closeButton,
                 new Color(0.018f, 0.055f, 0.12f, 1f),
@@ -1643,8 +1814,8 @@ namespace StarForge.Presentation
                 exchangeQuantityPanel.transform,
                 new Color(0.035f, 0.035f, 0.075f, 1f));
             RectTransform dialogRect = dialog.GetComponent<RectTransform>();
-            dialogRect.anchorMin = new Vector2(0.13f, 0.34f);
-            dialogRect.anchorMax = new Vector2(0.87f, 0.66f);
+            dialogRect.anchorMin = new Vector2(0.13f, 0.29f);
+            dialogRect.anchorMax = new Vector2(0.87f, 0.71f);
             dialogRect.offsetMin = Vector2.zero;
             dialogRect.offsetMax = Vector2.zero;
             ApplyCanvasFrame(
@@ -1718,6 +1889,30 @@ namespace StarForge.Presentation
             exchangeQuantityPreviewText.color = new Color(0.66f, 0.82f, 0.94f, 1f);
             SetPreferredHeight(exchangeQuantityPreviewText, 34f);
 
+            GameObject presetRow = new GameObject(
+                "Quantity Presets",
+                typeof(RectTransform),
+                typeof(LayoutElement));
+            presetRow.transform.SetParent(dialog.transform, false);
+            presetRow.GetComponent<LayoutElement>().preferredHeight = 52f;
+            HorizontalLayoutGroup presetLayout =
+                presetRow.AddComponent<HorizontalLayoutGroup>();
+            presetLayout.spacing = 10f;
+            presetLayout.childControlWidth = true;
+            presetLayout.childControlHeight = true;
+            presetLayout.childForceExpandWidth = true;
+            presetLayout.childForceExpandHeight = true;
+
+            Button preset10Button = CreateButton("10개 교환", 17, presetRow.transform);
+            preset10Button.onClick.AddListener(() => ApplyExchangeQuantityPreset(10));
+
+            Button preset100Button = CreateButton("100개 교환", 17, presetRow.transform);
+            preset100Button.onClick.AddListener(() => ApplyExchangeQuantityPreset(100));
+
+            Button presetMaxButton = CreateButton("MAX 교환", 17, presetRow.transform);
+            presetMaxButton.image.color = new Color(0.1f, 0.07f, 0.2f, 1f);
+            presetMaxButton.onClick.AddListener(ApplyMaxExchangeQuantity);
+
             exchangeQuantityStatusText = CreateText(
                 "",
                 17,
@@ -1746,7 +1941,163 @@ namespace StarForge.Presentation
             exchangeQuantityConfirmButton.image.color = new Color(0.16f, 0.07f, 0.24f, 1f);
             exchangeQuantityConfirmButton.onClick.AddListener(ConfirmExchangeQuantity);
 
+            BuildExchangeNumpad(exchangeQuantityPanel.transform);
+
             exchangeQuantityPanel.SetActive(false);
+        }
+
+        private void BuildExchangeNumpad(Transform parent)
+        {
+            exchangeNumpadPanel = CreatePanel(
+                "Exchange Numpad Overlay",
+                parent,
+                new Color(0.004f, 0.006f, 0.016f, 0.62f));
+            RectTransform overlayRect = exchangeNumpadPanel.GetComponent<RectTransform>();
+            overlayRect.anchorMin = Vector2.zero;
+            overlayRect.anchorMax = Vector2.one;
+            overlayRect.offsetMin = Vector2.zero;
+            overlayRect.offsetMax = Vector2.zero;
+            // Tapping outside the keypad commits the current value and closes it.
+            Button dismissButton = exchangeNumpadPanel.AddComponent<Button>();
+            dismissButton.transition = Selectable.Transition.None;
+            dismissButton.onClick.AddListener(CloseExchangeNumpad);
+
+            GameObject sheet = CreatePanel(
+                "Numpad Sheet",
+                exchangeNumpadPanel.transform,
+                new Color(0.03f, 0.04f, 0.085f, 1f));
+            RectTransform sheetRect = sheet.GetComponent<RectTransform>();
+            sheetRect.anchorMin = new Vector2(0.06f, 0.05f);
+            sheetRect.anchorMax = new Vector2(0.94f, 0.5f);
+            sheetRect.offsetMin = Vector2.zero;
+            sheetRect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                sheet,
+                new Color(0.016f, 0.03f, 0.07f, 1f),
+                new Color(0.2f, 0.42f, 0.78f, 1f),
+                2f);
+
+            Text heading = CreateText(
+                "교환 수량 입력",
+                18,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                sheet.transform);
+            RectTransform headingRect = heading.GetComponent<RectTransform>();
+            headingRect.anchorMin = new Vector2(0.06f, 0.88f);
+            headingRect.anchorMax = new Vector2(0.94f, 0.99f);
+            headingRect.offsetMin = Vector2.zero;
+            headingRect.offsetMax = Vector2.zero;
+            heading.color = new Color(0.7f, 0.84f, 1f, 1f);
+
+            string[][] rows =
+            {
+                new[] { "7", "8", "9" },
+                new[] { "4", "5", "6" },
+                new[] { "1", "2", "3" },
+                new[] { "C", "0", "⌫" }
+            };
+            const float top = 0.86f;
+            const float bottom = 0.18f;
+            float rowHeight = (top - bottom) / rows.Length;
+            const float left = 0.04f;
+            const float right = 0.96f;
+            float columnWidth = (right - left) / 3f;
+            for (int r = 0; r < rows.Length; r++)
+            {
+                for (int c = 0; c < 3; c++)
+                {
+                    string key = rows[r][c];
+                    Button keyButton = CreateButton(key, 30, sheet.transform);
+                    if (key == "C" || key == "⌫")
+                    {
+                        keyButton.image.color = new Color(0.07f, 0.05f, 0.12f, 1f);
+                    }
+
+                    RectTransform keyRect = keyButton.GetComponent<RectTransform>();
+                    float yMax = top - r * rowHeight;
+                    float yMin = yMax - rowHeight;
+                    float xMin = left + c * columnWidth;
+                    float xMax = xMin + columnWidth;
+                    keyRect.anchorMin = new Vector2(xMin + 0.012f, yMin + 0.014f);
+                    keyRect.anchorMax = new Vector2(xMax - 0.012f, yMax - 0.014f);
+                    keyRect.offsetMin = Vector2.zero;
+                    keyRect.offsetMax = Vector2.zero;
+                    string captured = key;
+                    keyButton.onClick.AddListener(() => OnExchangeNumpadKey(captured));
+                }
+            }
+
+            Button confirmButton = CreateButton("확인", 22, sheet.transform);
+            RectTransform confirmRect = confirmButton.GetComponent<RectTransform>();
+            confirmRect.anchorMin = new Vector2(0.04f, 0.03f);
+            confirmRect.anchorMax = new Vector2(0.96f, 0.15f);
+            confirmRect.offsetMin = Vector2.zero;
+            confirmRect.offsetMax = Vector2.zero;
+            confirmButton.image.color = new Color(0.07f, 0.18f, 0.32f, 1f);
+            confirmButton.onClick.AddListener(CloseExchangeNumpad);
+
+            exchangeNumpadPanel.SetActive(false);
+        }
+
+        private void OpenExchangeNumpad()
+        {
+            if (exchangeNumpadPanel != null)
+            {
+                exchangeNumpadPanel.SetActive(true);
+            }
+        }
+
+        private void CloseExchangeNumpad()
+        {
+            if (exchangeNumpadPanel == null)
+            {
+                return;
+            }
+
+            int quantity;
+            if (exchangeQuantityInput != null &&
+                (!int.TryParse(exchangeQuantityInput.text, out quantity) || quantity < 1))
+            {
+                exchangeQuantityInput.text = "1";
+            }
+
+            exchangeNumpadPanel.SetActive(false);
+        }
+
+        private void OnExchangeNumpadKey(string key)
+        {
+            if (exchangeQuantityInput == null)
+            {
+                return;
+            }
+
+            string current = exchangeQuantityInput.text ?? string.Empty;
+            if (key == "C")
+            {
+                current = string.Empty;
+            }
+            else if (key == "⌫")
+            {
+                current = current.Length > 0
+                    ? current.Substring(0, current.Length - 1)
+                    : string.Empty;
+            }
+            else
+            {
+                // Drop a lone leading zero so digits read naturally (0 -> 5, not 05).
+                if (current == "0")
+                {
+                    current = string.Empty;
+                }
+
+                if (current.Length < 9)
+                {
+                    current += key;
+                }
+            }
+
+            exchangeQuantityInput.text = current;
         }
 
         private InputField CreateIntegerInputField(Transform parent)
@@ -1799,6 +2150,26 @@ namespace StarForge.Presentation
             inputField.characterLimit = 9;
             inputField.caretColor = new Color(0.36f, 0.86f, 1f, 1f);
             inputField.selectionColor = new Color(0.2f, 0.45f, 0.65f, 0.7f);
+            // Direct entry is handled by the in-game number pad (consistent on every
+            // platform, no OS keyboard), so the field itself is display-only.
+            inputField.readOnly = true;
+
+            GameObject tapCatcher = new GameObject(
+                "Tap To Type",
+                typeof(RectTransform),
+                typeof(Image),
+                typeof(Button));
+            tapCatcher.transform.SetParent(inputObject.transform, false);
+            RectTransform tapRect = tapCatcher.GetComponent<RectTransform>();
+            tapRect.anchorMin = Vector2.zero;
+            tapRect.anchorMax = Vector2.one;
+            tapRect.offsetMin = Vector2.zero;
+            tapRect.offsetMax = Vector2.zero;
+            Image tapImage = tapCatcher.GetComponent<Image>();
+            tapImage.color = new Color(0f, 0f, 0f, 0f);
+            Button tapButton = tapCatcher.GetComponent<Button>();
+            tapButton.transition = Selectable.Transition.None;
+            tapButton.onClick.AddListener(OpenExchangeNumpad);
             return inputField;
         }
 
@@ -1823,18 +2194,58 @@ namespace StarForge.Presentation
             exchangeQuantityStatusText.text = string.Empty;
             exchangeQuantityInput.text = "1";
             RefreshExchangeQuantityPreview(exchangeQuantityInput.text);
+            CloseExchangeNumpad();
             exchangeQuantityPanel.SetActive(true);
-            exchangeQuantityInput.Select();
-            exchangeQuantityInput.ActivateInputField();
         }
 
         private void CloseExchangeQuantityPanel()
         {
             pendingExchangeRouteIndex = -1;
+            CloseExchangeNumpad();
             if (exchangeQuantityPanel != null)
             {
                 exchangeQuantityPanel.SetActive(false);
             }
+        }
+
+        // Largest number of exchanges that is actually executable right now, bounded
+        // by owned source materials, the daily limit, and the target's storage cap.
+        private int ComputeMaxExchangeQuantity(int routeIndex)
+        {
+            StarForgeMaterialExchangeRoute route = exchangeService.GetRoute(routeIndex);
+            if (route == null ||
+                lastSaveData == null ||
+                route.sourceAmount <= 0 ||
+                route.targetAmount <= 0 ||
+                !exchangeService.IsUnlocked(lastSaveData, routeIndex))
+            {
+                return 0;
+            }
+
+            long maxBySource =
+                (long)lastSaveData.GetCurrency(route.sourceType) / route.sourceAmount;
+            long maxByDaily = exchangeService.GetRemainingDailyExchanges(
+                lastSaveData, routeIndex, DateTime.Now);
+            long maxByTargetCap =
+                ((long)int.MaxValue - lastSaveData.GetCurrency(route.targetType)) /
+                route.targetAmount;
+
+            long max = Math.Min(maxBySource, Math.Min(maxByDaily, maxByTargetCap));
+            max = Math.Max(0L, Math.Min(max, 999999999L));
+            return (int)max;
+        }
+
+        private void ApplyExchangeQuantityPreset(int requested)
+        {
+            int max = ComputeMaxExchangeQuantity(pendingExchangeRouteIndex);
+            int value = max >= 1 ? Math.Min(requested, max) : 1;
+            exchangeQuantityInput.text = Math.Max(1, value).ToString();
+        }
+
+        private void ApplyMaxExchangeQuantity()
+        {
+            int max = ComputeMaxExchangeQuantity(pendingExchangeRouteIndex);
+            exchangeQuantityInput.text = Math.Max(1, max).ToString();
         }
 
         private void AdjustExchangeQuantity(int delta)
@@ -2059,12 +2470,20 @@ namespace StarForge.Presentation
             overlayRect.offsetMin = Vector2.zero;
             overlayRect.offsetMax = Vector2.zero;
 
+            // Detail root holds the existing 3D showcase (shown when a card is tapped).
+            collectionDetailRoot = CreatePanel(
+                "Collection Detail",
+                collectionPanel.transform,
+                new Color(0f, 0f, 0f, 0f));
+            collectionDetailRoot.GetComponent<Image>().raycastTarget = false;
+            StretchRect(collectionDetailRoot.GetComponent<RectTransform>(), Vector2.zero);
+
             GameObject previewObject = new GameObject(
                 "Collection Space View",
                 typeof(RectTransform),
                 typeof(RawImage),
                 typeof(StarForgeDragRotationInput));
-            previewObject.transform.SetParent(collectionPanel.transform, false);
+            previewObject.transform.SetParent(collectionDetailRoot.transform, false);
             RectTransform previewRect = previewObject.GetComponent<RectTransform>();
             previewRect.anchorMin = Vector2.zero;
             previewRect.anchorMax = Vector2.one;
@@ -2089,7 +2508,7 @@ namespace StarForge.Presentation
             collectionPlanetImage.texture = collectionPreview.OutputTexture;
             collectionPreview.Hide();
 
-            Button exitButton = CreateButton("나가기", 22, collectionPanel.transform);
+            Button exitButton = CreateButton("뒤로", 22, collectionDetailRoot.transform);
             RectTransform exitRect = exitButton.GetComponent<RectTransform>();
             exitRect.anchorMin = new Vector2(0.025f, 0.875f);
             exitRect.anchorMax = new Vector2(0.205f, 0.94f);
@@ -2099,7 +2518,7 @@ namespace StarForge.Presentation
             StyleCollectionSpaceButton(
                 exitButton,
                 new Color(0.16f, 0.72f, 1f, 1f));
-            exitButton.onClick.AddListener(CloseCollectionPanel);
+            exitButton.onClick.AddListener(ShowCollectionBrowse);
 
             string[] shapeLabels = { "일반 별", "하트별", "고양이별" };
             for (int i = 0; i < collectionShapeButtons.Length; i++)
@@ -2108,7 +2527,7 @@ namespace StarForge.Presentation
                 Button shapeButton = CreateButton(
                     shapeLabels[i],
                     17,
-                    collectionPanel.transform);
+                    collectionDetailRoot.transform);
                 collectionShapeButtons[i] = shapeButton;
                 collectionShapeButtonTexts[i] = shapeButton.GetComponentInChildren<Text>();
 
@@ -2127,7 +2546,7 @@ namespace StarForge.Presentation
                     () => SelectCollectionShape((StarForgePlanetShape)shapeIndex));
             }
 
-            collectionSkipToggle = CreateCollectionSkipToggle(collectionPanel.transform);
+            collectionSkipToggle = CreateCollectionSkipToggle(collectionDetailRoot.transform);
             RectTransform skipToggleRect =
                 collectionSkipToggle.GetComponent<RectTransform>();
             skipToggleRect.anchorMin = new Vector2(0.795f, 0.875f);
@@ -2143,7 +2562,7 @@ namespace StarForge.Presentation
                 30,
                 FontStyle.Bold,
                 TextAnchor.MiddleCenter,
-                collectionPanel.transform);
+                collectionDetailRoot.transform);
             RectTransform titleRect = collectionTitleText.GetComponent<RectTransform>();
             titleRect.anchorMin = new Vector2(0.12f, 0.76f);
             titleRect.anchorMax = new Vector2(0.88f, 0.825f);
@@ -2153,7 +2572,7 @@ namespace StarForge.Presentation
             collectionTitleText.resizeTextMinSize = 18;
             collectionTitleText.resizeTextMaxSize = 30;
 
-            collectionPreviousButton = CreateButton("<", 48, collectionPanel.transform);
+            collectionPreviousButton = CreateButton("<", 48, collectionDetailRoot.transform);
             RectTransform previousRect = collectionPreviousButton.GetComponent<RectTransform>();
             previousRect.anchorMin = new Vector2(0.015f, 0.405f);
             previousRect.anchorMax = new Vector2(0.13f, 0.515f);
@@ -2162,7 +2581,7 @@ namespace StarForge.Presentation
             StyleCollectionArrowButton(collectionPreviousButton);
             collectionPreviousButton.onClick.AddListener(() => NavigateCollection(-1));
 
-            collectionNextButton = CreateButton(">", 48, collectionPanel.transform);
+            collectionNextButton = CreateButton(">", 48, collectionDetailRoot.transform);
             RectTransform nextRect = collectionNextButton.GetComponent<RectTransform>();
             nextRect.anchorMin = new Vector2(0.87f, 0.405f);
             nextRect.anchorMax = new Vector2(0.985f, 0.515f);
@@ -2173,7 +2592,740 @@ namespace StarForge.Presentation
 
             collectionMaxUnlockedLevel = 0;
             RefreshCollectionShapeButtons();
+            BuildCollectionBrowse(collectionPanel.transform);
+            collectionDetailRoot.SetActive(false);
             collectionPanel.SetActive(false);
+        }
+
+        private static readonly string[] CollectionShapeLabels =
+            { "일반 별", "하트별", "고양이별" };
+
+        private void BuildCollectionBrowse(Transform parent)
+        {
+            collectionBrowseRoot = CreatePanel(
+                "Collection Browse",
+                parent,
+                new Color(0.004f, 0.008f, 0.02f, 1f));
+            StretchRect(collectionBrowseRoot.GetComponent<RectTransform>(), Vector2.zero);
+
+            Text header = CreateText(
+                "도감", 30, FontStyle.Bold, TextAnchor.MiddleCenter,
+                collectionBrowseRoot.transform);
+            RectTransform headerRect = header.GetComponent<RectTransform>();
+            headerRect.anchorMin = new Vector2(0.2f, 0.905f);
+            headerRect.anchorMax = new Vector2(0.8f, 0.975f);
+            headerRect.offsetMin = Vector2.zero;
+            headerRect.offsetMax = Vector2.zero;
+            header.color = new Color(1f, 0.9f, 0.55f, 1f);
+
+            Button closeButton = CreateButton("나가기", 20, collectionBrowseRoot.transform);
+            RectTransform closeRect = closeButton.GetComponent<RectTransform>();
+            closeRect.anchorMin = new Vector2(0.78f, 0.905f);
+            closeRect.anchorMax = new Vector2(0.97f, 0.97f);
+            closeRect.offsetMin = Vector2.zero;
+            closeRect.offsetMax = Vector2.zero;
+            closeButton.onClick.AddListener(CloseCollectionPanel);
+
+            collectionPlanetTabButton = CreateButton(
+                "행성", 20, collectionBrowseRoot.transform);
+            RectTransform planetTabRect = collectionPlanetTabButton.GetComponent<RectTransform>();
+            planetTabRect.anchorMin = new Vector2(0.06f, 0.83f);
+            planetTabRect.anchorMax = new Vector2(0.5f, 0.89f);
+            planetTabRect.offsetMin = Vector2.zero;
+            planetTabRect.offsetMax = Vector2.zero;
+            collectionPlanetTabButton.onClick.AddListener(
+                () => SelectCollectionBrowseTab(true));
+
+            collectionAchievementTabButton = CreateButton(
+                "업적", 20, collectionBrowseRoot.transform);
+            RectTransform achTabRect = collectionAchievementTabButton.GetComponent<RectTransform>();
+            achTabRect.anchorMin = new Vector2(0.5f, 0.83f);
+            achTabRect.anchorMax = new Vector2(0.94f, 0.89f);
+            achTabRect.offsetMin = Vector2.zero;
+            achTabRect.offsetMax = Vector2.zero;
+            collectionAchievementTabButton.onClick.AddListener(
+                () => SelectCollectionBrowseTab(false));
+
+            BuildCollectionPlanetTab(collectionBrowseRoot.transform);
+            BuildCollectionAchievementTab(collectionBrowseRoot.transform);
+            BuildCollectionAchievementClaimBadge(
+                collectionBrowseRoot.GetComponent<RectTransform>());
+        }
+
+        private void BuildCollectionPlanetTab(Transform parent)
+        {
+            collectionPlanetTabRoot = CreatePanel(
+                "Planet Tab", parent, new Color(0f, 0f, 0f, 0f));
+            collectionPlanetTabRoot.GetComponent<Image>().raycastTarget = false;
+            RectTransform rootRect = collectionPlanetTabRoot.GetComponent<RectTransform>();
+            rootRect.anchorMin = Vector2.zero;
+            rootRect.anchorMax = new Vector2(1f, 0.81f);
+            rootRect.offsetMin = Vector2.zero;
+            rootRect.offsetMax = Vector2.zero;
+
+            float fw = 0.88f / 3f;
+            for (int i = 0; i < collectionBrowseShapeButtons.Length; i++)
+            {
+                int idx = i;
+                Button b = CreateButton(
+                    CollectionShapeLabels[i], 16, collectionPlanetTabRoot.transform);
+                collectionBrowseShapeButtons[i] = b;
+                RectTransform r = b.GetComponent<RectTransform>();
+                float left = 0.06f + i * fw;
+                r.anchorMin = new Vector2(left + 0.006f, 0.9f);
+                r.anchorMax = new Vector2(left + fw - 0.006f, 0.97f);
+                r.offsetMin = Vector2.zero;
+                r.offsetMax = Vector2.zero;
+                b.onClick.AddListener(
+                    () => SelectBrowseShape((StarForgePlanetShape)idx));
+            }
+
+            collectionPlanetGridContent = CreateCollectionScrollArea(
+                collectionPlanetTabRoot.transform,
+                new Vector2(0.03f, 0.02f),
+                new Vector2(0.97f, 0.87f),
+                true);
+        }
+
+        private void BuildCollectionAchievementTab(Transform parent)
+        {
+            collectionAchievementTabRoot = CreatePanel(
+                "Achievement Tab", parent, new Color(0f, 0f, 0f, 0f));
+            collectionAchievementTabRoot.GetComponent<Image>().raycastTarget = false;
+            RectTransform rootRect = collectionAchievementTabRoot.GetComponent<RectTransform>();
+            rootRect.anchorMin = Vector2.zero;
+            rootRect.anchorMax = new Vector2(1f, 0.81f);
+            rootRect.offsetMin = Vector2.zero;
+            rootRect.offsetMax = Vector2.zero;
+
+            collectionAchievementProgressText = CreateText(
+                "업적 0 / 0", 18, FontStyle.Bold, TextAnchor.MiddleCenter,
+                collectionAchievementTabRoot.transform);
+            RectTransform progRect =
+                collectionAchievementProgressText.GetComponent<RectTransform>();
+            progRect.anchorMin = new Vector2(0.06f, 0.9f);
+            progRect.anchorMax = new Vector2(0.72f, 0.975f);
+            progRect.offsetMin = Vector2.zero;
+            progRect.offsetMax = Vector2.zero;
+            collectionAchievementProgressText.color = new Color(1f, 0.88f, 0.5f, 1f);
+
+            achievementClaimAllButton = CreateButton(
+                "모두 수령", 16, collectionAchievementTabRoot.transform);
+            RectTransform claimAllRect =
+                achievementClaimAllButton.GetComponent<RectTransform>();
+            claimAllRect.anchorMin = new Vector2(0.74f, 0.905f);
+            claimAllRect.anchorMax = new Vector2(0.94f, 0.97f);
+            claimAllRect.offsetMin = Vector2.zero;
+            claimAllRect.offsetMax = Vector2.zero;
+            StyleCollectionSpaceButton(
+                achievementClaimAllButton,
+                new Color(1f, 0.65f, 0.18f, 1f));
+            achievementClaimAllButton.onClick.AddListener(
+                () => AchievementClaimAllRequested?.Invoke());
+
+            collectionAchievementContent = CreateCollectionScrollArea(
+                collectionAchievementTabRoot.transform,
+                new Vector2(0.03f, 0.02f),
+                new Vector2(0.97f, 0.87f),
+                false);
+        }
+
+        private RectTransform CreateCollectionScrollArea(
+            Transform parent,
+            Vector2 anchorMin,
+            Vector2 anchorMax,
+            bool grid)
+        {
+            GameObject scrollObj = CreatePanel(
+                "Scroll", parent, new Color(0.006f, 0.012f, 0.03f, 0.55f));
+            RectTransform scrollRect = scrollObj.GetComponent<RectTransform>();
+            scrollRect.anchorMin = anchorMin;
+            scrollRect.anchorMax = anchorMax;
+            scrollRect.offsetMin = Vector2.zero;
+            scrollRect.offsetMax = Vector2.zero;
+            ScrollRect sr = scrollObj.AddComponent<ScrollRect>();
+            sr.horizontal = false;
+            sr.vertical = true;
+            sr.scrollSensitivity = 26f;
+            sr.movementType = ScrollRect.MovementType.Clamped;
+
+            GameObject viewport = CreatePanel(
+                "Viewport", scrollObj.transform, new Color(0f, 0f, 0f, 0.001f));
+            RectTransform vpRect = viewport.GetComponent<RectTransform>();
+            vpRect.anchorMin = Vector2.zero;
+            vpRect.anchorMax = Vector2.one;
+            vpRect.offsetMin = Vector2.zero;
+            vpRect.offsetMax = Vector2.zero;
+            viewport.AddComponent<RectMask2D>();
+
+            GameObject content = new GameObject("Content", typeof(RectTransform));
+            content.transform.SetParent(viewport.transform, false);
+            RectTransform contentRect = content.GetComponent<RectTransform>();
+            contentRect.anchorMin = new Vector2(0f, 1f);
+            contentRect.anchorMax = new Vector2(1f, 1f);
+            contentRect.pivot = new Vector2(0.5f, 1f);
+            contentRect.offsetMin = Vector2.zero;
+            contentRect.offsetMax = Vector2.zero;
+
+            if (grid)
+            {
+                GridLayoutGroup g = content.AddComponent<GridLayoutGroup>();
+                g.padding = new RectOffset(8, 8, 10, 10);
+                // Smaller, name-only cards so 3 columns never clip on narrow phones.
+                g.cellSize = new Vector2(146f, 100f);
+                g.spacing = new Vector2(10f, 12f);
+                g.constraint = GridLayoutGroup.Constraint.FixedColumnCount;
+                g.constraintCount = 3;
+                g.childAlignment = TextAnchor.UpperCenter;
+            }
+            else
+            {
+                VerticalLayoutGroup v = content.AddComponent<VerticalLayoutGroup>();
+                v.padding = new RectOffset(10, 10, 10, 10);
+                v.spacing = 10f;
+                v.childControlWidth = true;
+                v.childForceExpandWidth = true;
+                v.childControlHeight = true;
+                v.childForceExpandHeight = false;
+                v.childAlignment = TextAnchor.UpperCenter;
+            }
+
+            ContentSizeFitter fitter = content.AddComponent<ContentSizeFitter>();
+            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            sr.viewport = vpRect;
+            sr.content = contentRect;
+            return contentRect;
+        }
+
+        private void ShowCollectionBrowse()
+        {
+            if (collectionPreview != null)
+            {
+                collectionPreview.Hide();
+            }
+
+            collectionTransitioning = false;
+            if (collectionDetailRoot != null)
+            {
+                collectionDetailRoot.SetActive(false);
+            }
+
+            if (collectionBrowseRoot != null)
+            {
+                collectionBrowseRoot.SetActive(true);
+            }
+
+            if (!IsCollectionShapeDiscovered(collectionBrowseShape))
+            {
+                collectionBrowseShape = StarForgePlanetShape.Default;
+            }
+
+            SelectCollectionBrowseTab(true);
+        }
+
+        private void ShowCollectionDetail(StarForgePlanetShape shape, int level)
+        {
+            collectionShape = shape;
+            collectionMaxUnlockedLevel = GetCollectionShapeMaxLevel(shape);
+            collectionCurrentLevel = Mathf.Clamp(level, 0, collectionMaxUnlockedLevel);
+            RefreshCollectionShapeButtons();
+            collectionPreview.ResetCameraOrbit();
+            if (collectionBrowseRoot != null)
+            {
+                collectionBrowseRoot.SetActive(false);
+            }
+
+            if (collectionDetailRoot != null)
+            {
+                collectionDetailRoot.SetActive(true);
+            }
+
+            ShowCurrentCollectionStage();
+        }
+
+        private void SelectCollectionBrowseTab(bool planet)
+        {
+            if (collectionPlanetTabRoot != null)
+            {
+                collectionPlanetTabRoot.SetActive(planet);
+            }
+
+            if (collectionAchievementTabRoot != null)
+            {
+                collectionAchievementTabRoot.SetActive(!planet);
+            }
+
+            HighlightTabButton(collectionPlanetTabButton, planet);
+            HighlightTabButton(collectionAchievementTabButton, !planet);
+
+            if (planet)
+            {
+                RefreshPlanetCards();
+            }
+            else
+            {
+                RefreshAchievementList();
+            }
+        }
+
+        private static void HighlightTabButton(Button button, bool active)
+        {
+            if (button == null || button.image == null)
+            {
+                return;
+            }
+
+            button.image.color = active
+                ? new Color(0.12f, 0.32f, 0.58f, 1f)
+                : new Color(0.02f, 0.06f, 0.13f, 0.98f);
+        }
+
+        private void SelectBrowseShape(StarForgePlanetShape shape)
+        {
+            if (!IsCollectionShapeDiscovered(shape))
+            {
+                UpdateBrowseShapeButtons();
+                return;
+            }
+
+            collectionBrowseShape = shape;
+            RefreshPlanetCards();
+        }
+
+        private void UpdateBrowseShapeButtons()
+        {
+            for (int i = 0; i < collectionBrowseShapeButtons.Length; i++)
+            {
+                Button b = collectionBrowseShapeButtons[i];
+                if (b == null)
+                {
+                    continue;
+                }
+
+                bool discovered = IsCollectionShapeDiscovered((StarForgePlanetShape)i);
+                bool active = discovered &&
+                              (StarForgePlanetShape)i == collectionBrowseShape;
+                b.interactable = discovered;
+                Text label = b.GetComponentInChildren<Text>();
+                if (label != null)
+                {
+                    label.text = discovered ? CollectionShapeLabels[i] : "???";
+                }
+
+                if (b.image != null)
+                {
+                    b.image.color = active
+                        ? new Color(0.12f, 0.32f, 0.58f, 1f)
+                        : new Color(0.02f, 0.06f, 0.13f, 0.98f);
+                }
+            }
+        }
+
+        private void RefreshPlanetCards()
+        {
+            if (collectionPlanetGridContent == null || balanceRef == null)
+            {
+                return;
+            }
+
+            for (int i = collectionPlanetGridContent.childCount - 1; i >= 0; i--)
+            {
+                Destroy(collectionPlanetGridContent.GetChild(i).gameObject);
+            }
+
+            int unlockedMax = IsCollectionShapeDiscovered(collectionBrowseShape)
+                ? GetCollectionShapeMaxLevel(collectionBrowseShape)
+                : -1;
+            for (int level = 0; level <= balanceRef.maxLevel; level++)
+            {
+                CreatePlanetCard(level, collectionBrowseShape, level <= unlockedMax);
+            }
+
+            UpdateBrowseShapeButtons();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(collectionPlanetGridContent);
+        }
+
+        private Sprite GetCollectionPlanetSprite()
+        {
+            if (collectionPlanetSprite == null)
+            {
+                Texture2D texture = StarForgeVisualLibrary.SoftCircleTexture;
+                collectionPlanetSprite = Sprite.Create(
+                    texture,
+                    new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(0.5f, 0.5f));
+            }
+
+            return collectionPlanetSprite;
+        }
+
+        private void CreatePlanetCard(
+            int level, StarForgePlanetShape shape, bool unlocked)
+        {
+            GameObject card = CreatePanel(
+                "Planet Card " + level,
+                collectionPlanetGridContent,
+                new Color(0.02f, 0.04f, 0.08f, 0.95f));
+            ApplyCanvasFrame(
+                card,
+                new Color(0.015f, 0.035f, 0.075f, 0.98f),
+                unlocked
+                    ? new Color(0.2f, 0.5f, 0.85f, 0.95f)
+                    : new Color(0.2f, 0.24f, 0.32f, 0.7f),
+                2f);
+
+            // Name only (no planet orb) — tapping opens the existing 3D detail view.
+            Text nameText = CreateText(
+                unlocked
+                    ? level + "강\n" + balanceRef.GetStageName(level, shape)
+                    : level + "강\n???",
+                20, FontStyle.Bold, TextAnchor.MiddleCenter, card.transform);
+            RectTransform nameRect = nameText.GetComponent<RectTransform>();
+            nameRect.anchorMin = new Vector2(0.08f, 0.1f);
+            nameRect.anchorMax = new Vector2(0.92f, 0.9f);
+            nameRect.offsetMin = Vector2.zero;
+            nameRect.offsetMax = Vector2.zero;
+            nameText.color = unlocked
+                ? new Color(0.92f, 0.96f, 1f, 1f)
+                : new Color(0.55f, 0.6f, 0.68f, 1f);
+            nameText.raycastTarget = false;
+            nameText.lineSpacing = 1f;
+            nameText.resizeTextForBestFit = true;
+            nameText.resizeTextMinSize = 12;
+            nameText.resizeTextMaxSize = 22;
+            nameText.horizontalOverflow = HorizontalWrapMode.Wrap;
+            nameText.verticalOverflow = VerticalWrapMode.Overflow;
+
+            Button button = card.AddComponent<Button>();
+            button.targetGraphic = card.GetComponent<Image>();
+            button.interactable = unlocked;
+            if (unlocked)
+            {
+                int capturedLevel = level;
+                StarForgePlanetShape capturedShape = shape;
+                button.onClick.AddListener(
+                    () => ShowCollectionDetail(capturedShape, capturedLevel));
+            }
+        }
+
+        public void RefreshAchievementList()
+        {
+            if (collectionAchievementContent == null)
+            {
+                return;
+            }
+
+            for (int i = collectionAchievementContent.childCount - 1; i >= 0; i--)
+            {
+                Destroy(collectionAchievementContent.GetChild(i).gameObject);
+            }
+
+            StarForgeAchievementDefinition[] defs =
+                achievementService.GetDefinitions();
+            int completedCount = 0;
+            for (int i = 0; i < defs.Length; i++)
+            {
+                if (lastSaveData != null &&
+                    lastSaveData.HasCompletedAchievement(defs[i].id))
+                {
+                    completedCount++;
+                }
+            }
+
+            if (collectionAchievementProgressText != null)
+            {
+                collectionAchievementProgressText.text =
+                    "업적 " + completedCount + " / " + defs.Length + " 달성";
+            }
+
+            // 섹션 없이 한 줄로 정렬: 완료(미수령) 맨 위 → 미완료 → 수령완료 맨 아래.
+            for (int pass = 0; pass < 3; pass++)
+            {
+                for (int i = 0; i < defs.Length; i++)
+                {
+                    StarForgeAchievementDefinition def = defs[i];
+                    bool completed = lastSaveData != null &&
+                                     lastSaveData.HasCompletedAchievement(def.id);
+                    bool claimed = lastSaveData != null &&
+                                   lastSaveData.HasClaimedAchievement(def.id);
+                    int rank = claimed ? 2 : completed ? 0 : 1;
+                    if (rank == pass)
+                    {
+                        CreateAchievementRow(def, completed);
+                    }
+                }
+            }
+
+            LayoutRebuilder.ForceRebuildLayoutImmediate(collectionAchievementContent);
+        }
+
+        private void AppendAchievementSection(
+            string title,
+            StarForgeAchievementDefinition[] defs,
+            params StarForgeAchievementKind[] kinds)
+        {
+            bool headerAdded = false;
+            for (int sortGroup = 0; sortGroup < 3; sortGroup++)
+            {
+                for (int i = 0; i < defs.Length; i++)
+                {
+                    StarForgeAchievementDefinition def = defs[i];
+                    if (Array.IndexOf(kinds, def.kind) < 0 ||
+                        GetAchievementSortGroup(def) != sortGroup)
+                    {
+                        continue;
+                    }
+
+                    if (!headerAdded)
+                    {
+                        Text header = CreateText(
+                            title, 16, FontStyle.Bold, TextAnchor.MiddleLeft,
+                            collectionAchievementContent);
+                        LayoutElement headerLayout =
+                            header.gameObject.AddComponent<LayoutElement>();
+                        headerLayout.minHeight = 32f;
+                        headerLayout.preferredHeight = 32f;
+                        header.color = new Color(0.55f, 0.7f, 0.95f, 1f);
+                        headerAdded = true;
+                    }
+
+                    bool completed = lastSaveData != null &&
+                                     lastSaveData.HasCompletedAchievement(def.id);
+                    CreateAchievementRow(def, completed);
+                }
+            }
+        }
+
+        private void CreateAchievementRow(
+            StarForgeAchievementDefinition def, bool completed)
+        {
+            bool claimable = IsAchievementClaimable(def);
+            bool claimed = IsAchievementClaimed(def);
+            Color backgroundColor = claimed
+                ? new Color(0.006f, 0.008f, 0.014f, 0.98f)
+                : claimable
+                    ? new Color(0.025f, 0.075f, 0.045f, 0.98f)
+                    : new Color(0.018f, 0.04f, 0.075f, 0.96f);
+            Color borderColor = claimed
+                ? new Color(0.18f, 0.2f, 0.25f, 0.85f)
+                : claimable
+                    ? new Color(0.32f, 0.9f, 0.5f, 0.95f)
+                    : new Color(0.16f, 0.5f, 1f, 0.82f);
+            GameObject row = CreatePanel(
+                "Achievement " + def.id,
+                collectionAchievementContent,
+                backgroundColor);
+            LayoutElement rowLayout = row.AddComponent<LayoutElement>();
+            rowLayout.minHeight = 98f;
+            rowLayout.preferredHeight = 98f;
+            ApplyCanvasFrame(
+                row,
+                backgroundColor,
+                borderColor,
+                2f);
+
+            Text name = CreateText(
+                completed ? def.achievementName : "???",
+                22, FontStyle.Bold, TextAnchor.UpperLeft,
+                row.transform);
+            RectTransform nameRect = name.GetComponent<RectTransform>();
+            nameRect.anchorMin = new Vector2(0.04f, 0.5f);
+            nameRect.anchorMax = new Vector2(0.55f, 0.94f);
+            // 제목을 10px 아래로 내림.
+            nameRect.offsetMin = new Vector2(0f, -10f);
+            nameRect.offsetMax = new Vector2(0f, -10f);
+            name.color = claimed
+                ? new Color(0.72f, 0.76f, 0.82f, 0.95f)
+                : claimable
+                    ? new Color(1f, 0.86f, 0.45f, 1f)
+                    : new Color(0.58f, 0.76f, 1f, 0.85f);
+            name.raycastTarget = false;
+            name.resizeTextForBestFit = true;
+            name.resizeTextMinSize = 13;
+            name.resizeTextMaxSize = 22;
+
+            Text desc = CreateText(
+                completed ? def.condition + " · " + def.tooltip : "???",
+                14, FontStyle.Normal,
+                TextAnchor.UpperLeft, row.transform);
+            RectTransform descRect = desc.GetComponent<RectTransform>();
+            descRect.anchorMin = new Vector2(0.04f, 0.06f);
+            descRect.anchorMax = new Vector2(0.55f, 0.48f);
+            descRect.offsetMin = Vector2.zero;
+            descRect.offsetMax = Vector2.zero;
+            desc.color = claimed
+                ? new Color(0.48f, 0.52f, 0.58f, 0.9f)
+                : completed
+                    ? new Color(0.78f, 0.85f, 0.95f, 1f)
+                    : new Color(0.48f, 0.6f, 0.78f, 0.75f);
+            desc.raycastTarget = false;
+            desc.resizeTextForBestFit = true;
+            desc.resizeTextMinSize = 10;
+            desc.resizeTextMaxSize = 14;
+            desc.horizontalOverflow = HorizontalWrapMode.Wrap;
+            desc.verticalOverflow = VerticalWrapMode.Truncate;
+
+            // Status sits at the far right; rewards are right-aligned just left of it
+            // and pulled further left as the reward count grows, so they never overlap.
+            Text status = CreateText(
+                GetAchievementStatusText(def, completed), 14, FontStyle.Bold,
+                TextAnchor.MiddleCenter, row.transform);
+            RectTransform statusRect = status.GetComponent<RectTransform>();
+            statusRect.anchorMin = new Vector2(0.86f, 0.3f);
+            statusRect.anchorMax = new Vector2(0.995f, 0.7f);
+            statusRect.offsetMin = Vector2.zero;
+            statusRect.offsetMax = Vector2.zero;
+            status.color = GetAchievementStatusColor(def);
+            status.raycastTarget = false;
+
+            CurrencyAmount[] rewards = def.rewards ?? new CurrencyAmount[0];
+            int rewardCount = 0;
+            if (completed)
+            {
+                for (int i = 0; i < rewards.Length && i < 3; i++)
+                {
+                    if (rewards[i] != null)
+                    {
+                        rewardCount++;
+                    }
+                }
+            }
+
+            // Reward icon + amount sit on the same middle line as the 달성 status
+            // (y 0.3~0.7), icon left and "xN" right, so the row reads on one line.
+            const float rewardStep = 0.115f;
+            const float rewardEnd = 0.845f;
+            float rx = rewardEnd - rewardCount * rewardStep;
+            if (completed)
+            {
+                for (int i = 0; i < rewards.Length && i < 3; i++)
+                {
+                    CurrencyAmount reward = rewards[i];
+                    if (reward == null)
+                    {
+                        continue;
+                    }
+
+                    GameObject iconObj = new GameObject(
+                        "Reward", typeof(RectTransform), typeof(Image));
+                    iconObj.transform.SetParent(row.transform, false);
+                    RectTransform ir = iconObj.GetComponent<RectTransform>();
+                    ir.anchorMin = new Vector2(rx, 0.3f);
+                    ir.anchorMax = new Vector2(rx + 0.05f, 0.7f);
+                    ir.offsetMin = Vector2.zero;
+                    ir.offsetMax = Vector2.zero;
+                    Image iconImage = iconObj.GetComponent<Image>();
+                    iconImage.sprite = GetMaterialIcon((int)reward.type);
+                    iconImage.preserveAspect = true;
+                    iconImage.raycastTarget = false;
+                    iconImage.color = claimed
+                        ? new Color(0.72f, 0.76f, 0.82f, 0.78f)
+                        : Color.white;
+
+                    Text amount = CreateText(
+                        "x" + StarForgeFormat.Number(reward.amount), 13,
+                        FontStyle.Bold, TextAnchor.MiddleLeft, row.transform);
+                    RectTransform ar = amount.GetComponent<RectTransform>();
+                    ar.anchorMin = new Vector2(rx + 0.052f, 0.3f);
+                    ar.anchorMax = new Vector2(rx + 0.112f, 0.7f);
+                    ar.offsetMin = Vector2.zero;
+                    ar.offsetMax = Vector2.zero;
+                    amount.horizontalOverflow = HorizontalWrapMode.Overflow;
+                    amount.color = claimed
+                        ? new Color(0.58f, 0.62f, 0.68f, 0.88f)
+                        : new Color(0.9f, 0.96f, 1f, 1f);
+                    amount.raycastTarget = false;
+                    rx += rewardStep;
+                }
+            }
+            else
+            {
+                Text hiddenReward = CreateText(
+                    "보상 ???", 13, FontStyle.Bold,
+                    TextAnchor.MiddleCenter, row.transform);
+                RectTransform hiddenRect =
+                    hiddenReward.GetComponent<RectTransform>();
+                hiddenRect.anchorMin = new Vector2(0.62f, 0.3f);
+                hiddenRect.anchorMax = new Vector2(0.845f, 0.7f);
+                hiddenRect.offsetMin = Vector2.zero;
+                hiddenRect.offsetMax = Vector2.zero;
+                hiddenReward.color = new Color(0.48f, 0.68f, 0.95f, 0.8f);
+                hiddenReward.raycastTarget = false;
+            }
+
+            if (claimable)
+            {
+                Button claimButton = CreateButton("수령", 13, row.transform);
+                RectTransform claimRect =
+                    claimButton.GetComponent<RectTransform>();
+                claimRect.anchorMin = new Vector2(0.86f, 0.3f);
+                claimRect.anchorMax = new Vector2(0.995f, 0.7f);
+                claimRect.offsetMin = Vector2.zero;
+                claimRect.offsetMax = Vector2.zero;
+                StyleCollectionSpaceButton(
+                    claimButton,
+                    new Color(1f, 0.62f, 0.18f, 1f));
+                string capturedId = def.id;
+                claimButton.onClick.AddListener(
+                    () => AchievementClaimRequested?.Invoke(capturedId));
+            }
+        }
+
+        private bool IsAchievementClaimable(
+            StarForgeAchievementDefinition def)
+        {
+            return def != null &&
+                   def.rewards != null &&
+                   def.rewards.Length > 0 &&
+                   lastSaveData != null &&
+                   lastSaveData.HasCompletedAchievement(def.id) &&
+                   !lastSaveData.HasClaimedAchievement(def.id);
+        }
+
+        private bool IsAchievementClaimed(
+            StarForgeAchievementDefinition def)
+        {
+            return def != null &&
+                   lastSaveData != null &&
+                   lastSaveData.HasCompletedAchievement(def.id) &&
+                   lastSaveData.HasClaimedAchievement(def.id);
+        }
+
+        private int GetAchievementSortGroup(
+            StarForgeAchievementDefinition def)
+        {
+            if (IsAchievementClaimed(def))
+            {
+                return 2;
+            }
+
+            return IsAchievementClaimable(def) ? 0 : 1;
+        }
+
+        private string GetAchievementStatusText(
+            StarForgeAchievementDefinition def,
+            bool completed)
+        {
+            if (!completed)
+            {
+                return "미달성";
+            }
+
+            return IsAchievementClaimable(def) ? "수령 가능" : "수령 완료";
+        }
+
+        private Color GetAchievementStatusColor(
+            StarForgeAchievementDefinition def)
+        {
+            if (IsAchievementClaimable(def))
+            {
+                return new Color(1f, 0.78f, 0.28f, 1f);
+            }
+
+            return IsAchievementClaimed(def)
+                ? new Color(0.58f, 0.62f, 0.68f, 0.9f)
+                : new Color(0.5f, 0.68f, 0.95f, 0.88f);
         }
 
         private void OpenCollectionPanel()
@@ -2198,7 +3350,285 @@ namespace StarForge.Presentation
             collectionPreview.ResetCameraOrbit();
             collectionPanel.SetActive(true);
             collectionPanel.transform.SetAsLastSibling();
-            ShowCurrentCollectionStage();
+            ShowCollectionBrowse();
+            ResetCollectionScrollsToTop();
+        }
+
+        private void ResetCollectionScrollsToTop()
+        {
+            ResetScrollToTop(collectionPlanetGridContent);
+            ResetScrollToTop(collectionAchievementContent);
+        }
+
+        private static void ResetScrollToTop(RectTransform content)
+        {
+            if (content == null)
+            {
+                return;
+            }
+
+            ScrollRect scrollRect = content.GetComponentInParent<ScrollRect>(true);
+            if (scrollRect == null)
+            {
+                return;
+            }
+
+            LayoutRebuilder.ForceRebuildLayoutImmediate(content);
+            Canvas.ForceUpdateCanvases();
+            scrollRect.StopMovement();
+            scrollRect.velocity = Vector2.zero;
+            scrollRect.verticalNormalizedPosition = 1f;
+        }
+
+        private void BuildCollectionClaimBadge(RectTransform root)
+        {
+            // Speech bubble under the 도감 nav button: shown when a reward is waiting.
+            collectionClaimBadge = CreateClaimBadge(
+                "Collection Claim Badge",
+                root,
+                new Vector2(0.45f, 0.858f),
+                new Vector2(0.79f, 0.892f));
+        }
+
+        private void BuildCollectionAchievementClaimBadge(RectTransform root)
+        {
+            // Same reward bubble, positioned under the 도감 > 업적 tab.
+            collectionAchievementClaimBadge = CreateClaimBadge(
+                "Collection Achievement Claim Badge",
+                root,
+                new Vector2(0.55f, 0.79f),
+                new Vector2(0.9f, 0.824f));
+        }
+
+        private GameObject CreateClaimBadge(
+            string name,
+            RectTransform root,
+            Vector2 anchorMin,
+            Vector2 anchorMax)
+        {
+            GameObject badge = CreatePanel(
+                name,
+                root,
+                new Color(0.06f, 0.045f, 0.012f, 0.98f));
+            badge.GetComponent<Image>().raycastTarget = false;
+            RectTransform rect = badge.GetComponent<RectTransform>();
+            rect.anchorMin = anchorMin;
+            rect.anchorMax = anchorMax;
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                badge,
+                new Color(0.07f, 0.05f, 0.014f, 0.99f),
+                new Color(1f, 0.82f, 0.32f, 1f),
+                1.5f);
+
+            GameObject tail = CreatePanel(
+                "Tail",
+                badge.transform,
+                new Color(1f, 0.82f, 0.32f, 1f));
+            RectTransform tailRect = tail.GetComponent<RectTransform>();
+            tailRect.anchorMin = new Vector2(0.5f, 1f);
+            tailRect.anchorMax = new Vector2(0.5f, 1f);
+            tailRect.pivot = new Vector2(0.5f, 0.5f);
+            tailRect.sizeDelta = new Vector2(13f, 13f);
+            tailRect.anchoredPosition = new Vector2(0f, -1f);
+            tailRect.localEulerAngles = new Vector3(0f, 0f, 45f);
+            tail.GetComponent<Image>().raycastTarget = false;
+
+            Text text = CreateText(
+                "보상을 수령하세요!",
+                14,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                badge.transform);
+            StretchRect(text.rectTransform, new Vector2(8f, 2f));
+            text.color = new Color(1f, 0.92f, 0.62f, 1f);
+            text.raycastTarget = false;
+            text.resizeTextForBestFit = true;
+            text.resizeTextMinSize = 9;
+            text.resizeTextMaxSize = 14;
+
+            badge.SetActive(false);
+            return badge;
+        }
+
+        private void BuildAchievementToast(RectTransform root)
+        {
+            // Disappearing banner on the main screen when an achievement clears:
+            // [gold orb] 업적 달성! / {이름}.
+            achievementToast = CreatePanel(
+                "Achievement Toast",
+                root,
+                new Color(0.015f, 0.035f, 0.085f, 0.97f));
+            achievementToast.GetComponent<Image>().raycastTarget = false;
+            RectTransform rect = achievementToast.GetComponent<RectTransform>();
+            rect.anchorMin = new Vector2(0.08f, 0.8f);
+            rect.anchorMax = new Vector2(0.92f, 0.92f);
+            rect.offsetMin = Vector2.zero;
+            rect.offsetMax = Vector2.zero;
+            ApplyCanvasFrame(
+                achievementToast,
+                new Color(0.02f, 0.05f, 0.12f, 0.98f),
+                new Color(1f, 0.82f, 0.34f, 1f),
+                2f);
+
+            achievementToastGroup = achievementToast.AddComponent<CanvasGroup>();
+            achievementToastGroup.alpha = 0f;
+            achievementToastGroup.interactable = false;
+            achievementToastGroup.blocksRaycasts = false;
+
+            GameObject iconObj = new GameObject(
+                "Icon", typeof(RectTransform), typeof(Image));
+            iconObj.transform.SetParent(achievementToast.transform, false);
+            RectTransform iconRect = iconObj.GetComponent<RectTransform>();
+            iconRect.anchorMin = new Vector2(0.02f, 0.5f);
+            iconRect.anchorMax = new Vector2(0.02f, 0.5f);
+            iconRect.pivot = new Vector2(0f, 0.5f);
+            iconRect.sizeDelta = new Vector2(58f, 58f);
+            iconRect.anchoredPosition = new Vector2(12f, 0f);
+            achievementToastIcon = iconObj.GetComponent<Image>();
+            achievementToastIcon.sprite =
+                GetMaterialIcon((int)StarForgeCurrencyType.PrimordialStar);
+            achievementToastIcon.preserveAspect = true;
+            achievementToastIcon.raycastTarget = false;
+
+            Text title = CreateText(
+                "업적 달성!",
+                16,
+                FontStyle.Bold,
+                TextAnchor.LowerLeft,
+                achievementToast.transform);
+            RectTransform titleRect = title.GetComponent<RectTransform>();
+            titleRect.anchorMin = new Vector2(0.16f, 0.66f);
+            titleRect.anchorMax = new Vector2(0.97f, 0.97f);
+            titleRect.offsetMin = Vector2.zero;
+            titleRect.offsetMax = Vector2.zero;
+            title.color = new Color(1f, 0.84f, 0.4f, 1f);
+            title.raycastTarget = false;
+
+            achievementToastNameText = CreateText(
+                "",
+                25,
+                FontStyle.Bold,
+                TextAnchor.MiddleLeft,
+                achievementToast.transform);
+            RectTransform nameRect =
+                achievementToastNameText.GetComponent<RectTransform>();
+            nameRect.anchorMin = new Vector2(0.16f, 0.38f);
+            nameRect.anchorMax = new Vector2(0.97f, 0.66f);
+            nameRect.offsetMin = Vector2.zero;
+            nameRect.offsetMax = Vector2.zero;
+            achievementToastNameText.color = new Color(1f, 0.96f, 0.74f, 1f);
+            achievementToastNameText.raycastTarget = false;
+            achievementToastNameText.resizeTextForBestFit = true;
+            achievementToastNameText.resizeTextMinSize = 14;
+            achievementToastNameText.resizeTextMaxSize = 26;
+
+            achievementToastFlavorText = CreateText(
+                "",
+                20,
+                FontStyle.Normal,
+                TextAnchor.UpperLeft,
+                achievementToast.transform);
+            RectTransform flavorRect =
+                achievementToastFlavorText.GetComponent<RectTransform>();
+            flavorRect.anchorMin = new Vector2(0.16f, 0.06f);
+            flavorRect.anchorMax = new Vector2(0.97f, 0.38f);
+            flavorRect.offsetMin = Vector2.zero;
+            flavorRect.offsetMax = Vector2.zero;
+            achievementToastFlavorText.color = new Color(0.74f, 0.82f, 0.95f, 1f);
+            achievementToastFlavorText.raycastTarget = false;
+            achievementToastFlavorText.resizeTextForBestFit = true;
+            achievementToastFlavorText.resizeTextMinSize = 14;
+            achievementToastFlavorText.resizeTextMaxSize = 20;
+            achievementToastFlavorText.horizontalOverflow = HorizontalWrapMode.Wrap;
+            achievementToastFlavorText.verticalOverflow = VerticalWrapMode.Truncate;
+
+            achievementToast.SetActive(false);
+        }
+
+        public void ShowAchievementToast(string achievementName, string flavor)
+        {
+            if (achievementToast == null)
+            {
+                return;
+            }
+
+            achievementToastQueue.Enqueue(
+                (achievementName ?? string.Empty, flavor ?? string.Empty));
+            if (achievementToastRoutine == null)
+            {
+                achievementToastRoutine =
+                    StartCoroutine(AchievementToastRoutine());
+            }
+        }
+
+        private IEnumerator AchievementToastRoutine()
+        {
+            while (achievementToastQueue.Count > 0)
+            {
+                (string toastName, string toastFlavor) = achievementToastQueue.Dequeue();
+                if (achievementToastNameText != null)
+                {
+                    achievementToastNameText.text = toastName;
+                }
+
+                if (achievementToastFlavorText != null)
+                {
+                    achievementToastFlavorText.text = toastFlavor;
+                }
+
+                achievementToast.SetActive(true);
+                achievementToast.transform.SetAsLastSibling();
+                yield return FadeAchievementToast(0f, 1f, 0.2f);
+                yield return new WaitForSecondsRealtime(2f);
+                yield return FadeAchievementToast(1f, 0f, 0.4f);
+                achievementToast.SetActive(false);
+            }
+
+            achievementToastRoutine = null;
+        }
+
+        private IEnumerator FadeAchievementToast(
+            float from, float to, float duration)
+        {
+            float elapsed = 0f;
+            while (elapsed < duration)
+            {
+                elapsed += Time.unscaledDeltaTime;
+                if (achievementToastGroup != null)
+                {
+                    achievementToastGroup.alpha =
+                        Mathf.Lerp(from, to, Mathf.Clamp01(elapsed / duration));
+                }
+
+                yield return null;
+            }
+
+            if (achievementToastGroup != null)
+            {
+                achievementToastGroup.alpha = to;
+            }
+        }
+
+        public void SetAchievementClaimable(bool claimable)
+        {
+            if (collectionClaimBadge != null &&
+                collectionClaimBadge.activeSelf != claimable)
+            {
+                collectionClaimBadge.SetActive(claimable);
+            }
+
+            if (collectionAchievementClaimBadge != null &&
+                collectionAchievementClaimBadge.activeSelf != claimable)
+            {
+                collectionAchievementClaimBadge.SetActive(claimable);
+            }
+
+            if (achievementClaimAllButton != null)
+            {
+                achievementClaimAllButton.interactable = true;
+            }
         }
 
         private void CloseCollectionPanel()
@@ -2344,6 +3774,15 @@ namespace StarForge.Presentation
             collectionTitleText.text =
                 collectionCurrentLevel + "강 : " +
                 balanceRef.GetStageName(collectionCurrentLevel, collectionShape);
+            StarForgeAchievementDefinition achievement =
+                achievementService.GetLevelDefinition(
+                    collectionCurrentLevel,
+                    collectionShape);
+            if (achievement != null)
+            {
+                collectionTitleText.text +=
+                    "\n업적 : " + achievement.achievementName;
+            }
             collectionTitleText.color = GetLevelTextColor(collectionCurrentLevel);
         }
 
@@ -2767,14 +4206,64 @@ namespace StarForge.Presentation
             RefreshReviveRows(saveData);
             SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
             revivePanel.SetActive(true);
+            UpdateEnhanceButtonInteractable();
         }
 
         public void HideReviveOverlay()
         {
+            StopReviveAdCooldownCountdown();
             if (revivePanel != null)
             {
                 revivePanel.SetActive(false);
             }
+
+            UpdateEnhanceButtonInteractable();
+        }
+
+        // Drives the rewarded-revive button: when the planet-keep ad is on cooldown
+        // the button is disabled and shows a live M:SS countdown until it expires.
+        public void SetReviveAdCooldown(float remainingSeconds)
+        {
+            StopReviveAdCooldownCountdown();
+            if (remainingSeconds <= 0f)
+            {
+                SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
+                return;
+            }
+
+            reviveAdCooldownRoutine =
+                StartCoroutine(ReviveAdCooldownCountdown(remainingSeconds));
+        }
+
+        private void StopReviveAdCooldownCountdown()
+        {
+            if (reviveAdCooldownRoutine != null)
+            {
+                StopCoroutine(reviveAdCooldownRoutine);
+                reviveAdCooldownRoutine = null;
+            }
+        }
+
+        private IEnumerator ReviveAdCooldownCountdown(float remainingSeconds)
+        {
+            float remaining = remainingSeconds;
+            while (remaining > 0f)
+            {
+                SetRewardedReviveButtonState(
+                    false,
+                    "광고 쿨타임 " + FormatCooldownClock(remaining));
+                yield return new WaitForSecondsRealtime(1f);
+                remaining -= 1f;
+            }
+
+            reviveAdCooldownRoutine = null;
+            SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
+        }
+
+        private static string FormatCooldownClock(float remainingSeconds)
+        {
+            int total = Mathf.Max(0, Mathf.CeilToInt(remainingSeconds));
+            return (total / 60) + ":" + (total % 60).ToString("00");
         }
 
         public void SetRewardedReviveButtonState(
@@ -2848,12 +4337,86 @@ namespace StarForge.Presentation
             }
 
             resultPanel.SetActive(true);
+            resultPanel.transform.SetAsLastSibling();
             SetResultRewards(null);
             resultTitleText.text = title;
             resultBodyText.text = body;
+            UpdateEnhanceButtonInteractable();
         }
 
-        private void SetResultRewards(CurrencyAmount[] rewards)
+        public void ShowAchievement(StarForgeAchievementUnlock achievement)
+        {
+            if (resultPanel == null ||
+                achievement == null ||
+                achievement.definition == null)
+            {
+                return;
+            }
+
+            if (resultPanel.activeSelf)
+            {
+                pendingAchievementOverlays.Enqueue(achievement);
+                return;
+            }
+
+            DisplayAchievement(achievement);
+        }
+
+        private void DisplayAchievement(StarForgeAchievementUnlock achievement)
+        {
+            StarForgeAchievementDefinition definition = achievement.definition;
+            resultPanel.SetActive(true);
+            resultTitleText.text = "업적 달성";
+            resultBodyText.text = BuildAchievementBody(definition);
+            SetResultRewards(definition.rewards);
+            UpdateEnhanceButtonInteractable();
+        }
+
+        private void CloseResultPanel()
+        {
+            resultPanel.SetActive(false);
+            if (pendingAchievementOverlays.Count > 0)
+            {
+                DisplayAchievement(pendingAchievementOverlays.Dequeue());
+            }
+
+            UpdateEnhanceButtonInteractable();
+        }
+
+        private static string BuildAchievementBody(
+            StarForgeAchievementDefinition definition)
+        {
+            System.Text.StringBuilder builder =
+                new System.Text.StringBuilder();
+            // Title ("업적 달성") lives in resultTitleText; the body shows just the
+            // achievement name and its tooltip, each in its own accent color.
+            builder.Append("<b><color=#FFD56A>");
+            builder.Append(definition.achievementName);
+            builder.Append("</color></b>\n\n<color=#9FE7FF>");
+            builder.Append(definition.tooltip);
+            builder.Append("</color>\n\n보상 : ");
+
+            CurrencyAmount[] rewards = definition.rewards;
+            for (int i = 0; i < rewards.Length; i++)
+            {
+                if (i > 0)
+                {
+                    builder.Append(", ");
+                }
+
+                builder.Append(
+                    StarForgeCurrencyNames.GetDisplayName(rewards[i].type));
+                builder.Append(' ');
+                builder.Append(StarForgeFormat.Number(rewards[i].amount));
+                builder.Append("개");
+            }
+
+            return builder.ToString();
+        }
+
+        private void SetResultRewards(
+            CurrencyAmount[] rewards,
+            string amountPrefix = "+")
         {
             if (resultRewardRow == null)
             {
@@ -2888,7 +4451,7 @@ namespace StarForge.Presentation
                 icon.sprite = GetMaterialIcon((int)rewards[i].type);
                 icon.color = Color.white;
                 amount.text =
-                    "+" + StarForgeFormat.Number(rewards[i].amount);
+                    amountPrefix + StarForgeFormat.Number(rewards[i].amount);
             }
         }
 
@@ -2988,7 +4551,7 @@ namespace StarForge.Presentation
             restartColors.selectedColor = restartColors.highlightedColor;
             restartButton.colors = restartColors;
             SetButtonTextColor(restartButton, new Color(1f, 0.84f, 0.82f, 1f));
-            restartButton.onClick.AddListener(() => revivePanel.SetActive(false));
+            restartButton.onClick.AddListener(HideReviveOverlay);
 
             rewardedReviveButton = CreateButton(
                 "광고 보고 현 단계 유지",
@@ -3108,7 +4671,7 @@ namespace StarForge.Presentation
             int capturedLevel = config.level;
             row.button.onClick.AddListener(() =>
             {
-                revivePanel.SetActive(false);
+                HideReviveOverlay();
                 ReviveRequested?.Invoke(capturedLevel);
             });
 
@@ -3308,6 +4871,7 @@ namespace StarForge.Presentation
             layoutElement.minHeight = 44f;
 
             Button button = buttonObject.GetComponent<Button>();
+            buttonObject.AddComponent<StarForgeButtonPress>();
             ApplyCanvasFrame(
                 buttonObject,
                 normal,
@@ -3317,7 +4881,7 @@ namespace StarForge.Presentation
             ColorBlock colors = button.colors;
             colors.normalColor = Color.white;
             colors.highlightedColor = new Color(1f, 1f, 1f, 1f);
-            colors.pressedColor = new Color(0.7f, 0.82f, 1f, 0.9f);
+            colors.pressedColor = new Color(0.55f, 0.72f, 1f, 0.95f);
             colors.selectedColor = colors.highlightedColor;
             colors.disabledColor = new Color(0.36f, 0.4f, 0.48f, 0.7f);
             button.colors = colors;
@@ -4380,9 +5944,27 @@ namespace StarForge.Presentation
             layoutElement.preferredHeight = height;
         }
 
-        private static string GetResultTitle(StarForgeResultKind kind)
+        private static string GetResultTitle(StarForgeEnhancementResult result)
         {
-            switch (kind)
+            if (result.discoveredBlackHole)
+            {
+                return "블랙홀 발견";
+            }
+
+            if (result.isBlackHole)
+            {
+                switch (result.kind)
+                {
+                    case StarForgeResultKind.Success:
+                        return "블랙홀 강화 성공";
+                    case StarForgeResultKind.Destroyed:
+                        return "블랙홀 소멸";
+                    case StarForgeResultKind.MaxLevel:
+                        return "블랙홀 최대 등급";
+                }
+            }
+
+            switch (result.kind)
             {
                 case StarForgeResultKind.Success:
                     return "융합 성공";
@@ -4401,6 +5983,34 @@ namespace StarForge.Presentation
 
         private static string BuildResultBody(StarForgeEnhancementResult result)
         {
+            if (result.discoveredBlackHole)
+            {
+                return "당신은 블랙홀을 발견했습니다.\n\n" +
+                       "블랙홀은 등급이 높아질수록\n" +
+                       "분해 시 훨씬 많은 보상을 지급하지만,\n" +
+                       "소멸 시에는 아무런 보상도 획득할 수 없습니다.";
+            }
+
+            if (result.isBlackHole)
+            {
+                if (result.kind == StarForgeResultKind.Destroyed)
+                {
+                    return result.message + "\n회수 보상: 없음";
+                }
+
+                if (result.kind == StarForgeResultKind.Success)
+                {
+                    return result.message +
+                           "\n블랙홀 " +
+                           result.previousBlackHoleLevel +
+                           "강 → " +
+                           result.newBlackHoleLevel +
+                           "강";
+                }
+
+                return result.message;
+            }
+
             string body = result.message;
             if (result.kind != StarForgeResultKind.Failure &&
                 result.kind != StarForgeResultKind.Fracture)

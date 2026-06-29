@@ -479,10 +479,14 @@ namespace StarForge.Presentation
             GameObject toggleObject = new GameObject(
                 text,
                 typeof(RectTransform),
+                typeof(Image),
                 typeof(Toggle),
                 typeof(LayoutElement));
             toggleObject.transform.SetParent(parent, false);
-            SetLayoutSize(toggleObject, 592f, 40f);
+            SetLayoutSize(toggleObject, 592f, 56f);
+
+            Image hitArea = toggleObject.GetComponent<Image>();
+            hitArea.color = new Color(1f, 1f, 1f, 0f);
 
             GameObject boxObject = new GameObject(
                 "Box",
@@ -490,10 +494,10 @@ namespace StarForge.Presentation
                 typeof(Image));
             boxObject.transform.SetParent(toggleObject.transform, false);
             RectTransform boxRect = boxObject.GetComponent<RectTransform>();
-            boxRect.anchorMin = new Vector2(0f, 0.5f);
-            boxRect.anchorMax = new Vector2(0f, 0.5f);
-            boxRect.sizeDelta = new Vector2(30f, 30f);
-            boxRect.anchoredPosition = new Vector2(18f, 0f);
+            boxRect.anchorMin = new Vector2(1f, 0.5f);
+            boxRect.anchorMax = new Vector2(1f, 0.5f);
+            boxRect.sizeDelta = new Vector2(42f, 42f);
+            boxRect.anchoredPosition = new Vector2(-28f, 0f);
             Image boxImage = boxObject.GetComponent<Image>();
             boxImage.color = new Color(0.015f, 0.05f, 0.11f, 1f);
             Outline boxOutline = boxObject.AddComponent<Outline>();
@@ -522,8 +526,9 @@ namespace StarForge.Presentation
             RectTransform labelRect = label.GetComponent<RectTransform>();
             labelRect.anchorMin = new Vector2(0f, 0f);
             labelRect.anchorMax = Vector2.one;
-            labelRect.offsetMin = new Vector2(52f, 0f);
-            labelRect.offsetMax = Vector2.zero;
+            labelRect.offsetMin = new Vector2(4f, 0f);
+            labelRect.offsetMax = new Vector2(-72f, 0f);
+            label.raycastTarget = false;
 
             Toggle toggle = toggleObject.GetComponent<Toggle>();
             toggle.targetGraphic = boxImage;

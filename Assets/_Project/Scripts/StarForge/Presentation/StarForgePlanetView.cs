@@ -113,6 +113,8 @@ namespace StarForge.Presentation
         private Quaternion automaticRotation = Quaternion.identity;
         private Coroutine chargeRoutine;
         private Coroutine transitionRoutine;
+        private GameObject externalBlackHoleObject;
+        private bool externalBlackHoleActive;
 
         private void Awake()
         {
@@ -123,7 +125,7 @@ namespace StarForge.Presentation
         {
             if (planetRoot != null)
             {
-                if (blackHoleFaceActive)
+                if (blackHoleFaceActive || externalBlackHoleActive)
                 {
                     planetRoot.localRotation = Quaternion.identity;
                 }
@@ -368,6 +370,29 @@ namespace StarForge.Presentation
             ApplyStageInternal(stage, false, false);
         }
 
+        public void ApplyBlackHoleStage(int blackHoleLevel)
+        {
+            int clampedLevel = Mathf.Clamp(
+                blackHoleLevel,
+                StarForgeBlackHoleRules.MinLevel,
+                StarForgeBlackHoleRules.MaxLevel);
+            StageVisualConfig stage = new StageVisualConfig
+            {
+                level = 30 + clampedLevel,
+                displayName = "블랙홀",
+                color = clampedLevel >= StarForgeBlackHoleRules.MaxLevel
+                    ? "#E8FAFF"
+                    : clampedLevel >= 7 ? "#D8AC52" : "#7656D8",
+                scale = 1.75f + clampedLevel * 0.08f,
+                emission = 2.6f + clampedLevel * 0.12f,
+                rotationSpeed = 22f + clampedLevel * 2f
+            };
+
+            ApplyStageInternal(stage, true, true);
+            EnsureExternalBlackHole();
+            SetExternalBlackHoleActive(externalBlackHoleObject != null);
+        }
+
         public IEnumerator PlayHighTierSuccessTransition(
             StageVisualConfig stage,
             float duration,
@@ -444,7 +469,14 @@ namespace StarForge.Presentation
         {
             EnsureCreated();
 
-            if (stage == null || stage.level == appliedLevel)
+            if (stage == null)
+            {
+                return;
+            }
+
+            SetExternalBlackHoleActive(false);
+
+            if (stage.level == appliedLevel)
             {
                 return;
             }
@@ -1670,6 +1702,60 @@ namespace StarForge.Presentation
             if (decorRoot != null)
             {
                 decorRoot.localScale = Vector3.one * scale * decorScaleMultiplier;
+            }
+        }
+
+        private void EnsureExternalBlackHole()
+        {
+            if (externalBlackHoleObject != null || planetRoot == null)
+            {
+                return;
+            }
+
+            GameObject prefab = Resources.Load<GameObject>("BlackHole");
+            if (prefab == null)
+            {
+                return;
+            }
+
+            externalBlackHoleObject = Instantiate(prefab, planetRoot, false);
+            externalBlackHoleObject.name = "StarForge BlackHole Asset";
+            externalBlackHoleObject.transform.localPosition = Vector3.zero;
+            externalBlackHoleObject.transform.localRotation = Quaternion.identity;
+            externalBlackHoleObject.transform.localScale = Vector3.one * 1.04f;
+
+            Collider[] colliders =
+                externalBlackHoleObject.GetComponentsInChildren<Collider>(true);
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                Destroy(colliders[i]);
+            }
+
+            externalBlackHoleObject.SetActive(false);
+        }
+
+        private void SetExternalBlackHoleActive(bool active)
+        {
+            externalBlackHoleActive = active && externalBlackHoleObject != null;
+            if (externalBlackHoleObject != null)
+            {
+                externalBlackHoleObject.SetActive(externalBlackHoleActive);
+            }
+
+            if (planetRenderer != null)
+            {
+                planetRenderer.enabled = !externalBlackHoleActive;
+            }
+
+            if (decorRoot != null)
+            {
+                decorRoot.gameObject.SetActive(!externalBlackHoleActive);
+            }
+
+            if (blackHoleFaceObject != null)
+            {
+                blackHoleFaceActive = false;
+                blackHoleFaceObject.SetActive(false);
             }
         }
 

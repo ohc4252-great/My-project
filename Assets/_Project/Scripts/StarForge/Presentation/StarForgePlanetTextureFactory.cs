@@ -38,6 +38,11 @@ namespace StarForge.Presentation
 
         public static StarForgePlanetTheme GetTheme(int level)
         {
+            if (level >= 31)
+            {
+                return StarForgePlanetTheme.BlackHole;
+            }
+
             if (level <= 7)
             {
                 return StarForgePlanetTheme.Rock;

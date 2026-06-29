@@ -55,8 +55,8 @@ namespace StarForge.Presentation
         private const float MinSpawnInterval = 0.28f;
         private const float DifficultyRampSeconds = 75f;
 
-        // Distance that counts as a "perfect" run for scoring purposes.
-        private const float PerfectDistance = 2000f;
+        // Distance that unlocks the special top reward tier.
+        private const float PerfectDistance = 10000f;
 
         // Persisted best flight distance (광년) across all play sessions.
         private const string BestDistancePrefKey = "StarForge.Mining.BestDistance";
@@ -79,7 +79,9 @@ namespace StarForge.Presentation
         private const float HeartDistanceBonus = 8f;
 
         public event Action<float> MiningStopped;
+        public event Action MiningRewardAccepted;
         public event Action MiningClosed;
+        public event Action MiningAbandoned;
         public event Action ContinueWithAdRequested;
         public event Action BonusAttemptWithAdRequested;
 
@@ -139,6 +141,7 @@ namespace StarForge.Presentation
         private RectTransform fieldImageRect;
         private Text distanceText;
         private Text bestText;
+        private GameObject pauseOverlay;
         private GameObject newRecordOverlay;
         private Text newRecordValueText;
         private Text attemptsText;
@@ -155,8 +158,8 @@ namespace StarForge.Presentation
         private Button boostButton;
         private Text boostButtonText;
         private readonly Image[] heartIcons = new Image[MaxLives];
-        private readonly Image[] resultRewardIcons = new Image[2];
-        private readonly Text[] resultRewardTexts = new Text[2];
+        private readonly Image[] resultRewardIcons = new Image[3];
+        private readonly Text[] resultRewardTexts = new Text[3];
         private readonly Sprite[] materialIconSprites = new Sprite[5];
         private readonly bool[] ownsMaterialIconSprite = new bool[5];
 
@@ -207,6 +210,7 @@ namespace StarForge.Presentation
         private bool canContinueCurrentRun;
         private int bestDistance;
         private bool pendingNewRecord;
+        private bool paused;
 
         private Texture2D generatedBackdrop;
         private Texture2D generatedPickupStarTexture;
@@ -293,6 +297,7 @@ namespace StarForge.Presentation
             BuildStartOverlay(safeArea);
             BuildResultOverlay(safeArea);
             BuildNewRecordOverlay(safeArea);
+            BuildPauseOverlay(safeArea);
 
             EnsureField();
             UpdateBestText();
@@ -347,7 +352,7 @@ namespace StarForge.Presentation
             UpdateMiningAudioState();
 
             float clamped = Mathf.Clamp01(normalizedScore);
-            int displayedScore = clamped >= 0.995f
+            int displayedScore = clamped >= 1f
                 ? 100
                 : Mathf.Clamp(Mathf.RoundToInt(clamped * 100f), 0, 99);
             GetGrade(clamped, out string grade, out Color gradeColor);
@@ -453,7 +458,18 @@ namespace StarForge.Presentation
 
         private void Update()
         {
-            float dt = Time.unscaledDeltaTime;
+            if (paused || rewardedAdBusy)
+            {
+                // Frozen for the exit-confirmation overlay, or while a rewarded ad is
+                // on screen (continue-with-ad): no motion, input, spawning or scoring
+                // happens until we explicitly resume — the booster flight only starts
+                // after the ad returns via ResumeRunWithBooster.
+                return;
+            }
+
+            // Cap the step so the first frame after an ad/pause (a large real-time
+            // delta) can't fast-forward the flight and spike the score.
+            float dt = Mathf.Min(Time.unscaledDeltaTime, 0.05f);
 
             if (state == MiningState.Running)
             {
@@ -698,6 +714,12 @@ namespace StarForge.Presentation
 
         private void Close()
         {
+            paused = false;
+            if (pauseOverlay != null)
+            {
+                pauseOverlay.SetActive(false);
+            }
+
             state = MiningState.Hidden;
             SetStartOverlayVisible(false);
             SetNewRecordVisible(false);
@@ -708,8 +730,72 @@ namespace StarForge.Presentation
             MiningClosed?.Invoke();
         }
 
+        // The exit button only interrupts an active run with a confirmation prompt;
+        // from the start/result screens it simply leaves the minigame.
+        private void HandleExitButton()
+        {
+            if (state == MiningState.Running)
+            {
+                PauseForExitConfirm();
+            }
+            else
+            {
+                Close();
+            }
+        }
+
+        private void PauseForExitConfirm()
+        {
+            if (paused || state != MiningState.Running)
+            {
+                return;
+            }
+
+            paused = true;
+            UpdateBoostButton();
+            UpdateMiningAudioState();
+            if (pauseOverlay != null)
+            {
+                pauseOverlay.SetActive(true);
+            }
+        }
+
+        private void ResumeFromPause()
+        {
+            if (!paused)
+            {
+                return;
+            }
+
+            paused = false;
+            if (pauseOverlay != null)
+            {
+                pauseOverlay.SetActive(false);
+            }
+
+            // Brief grace so a tap on "이어서 진행하기" doesn't immediately steer the ship.
+            inputReadyTime = Time.unscaledTime + 0.2f;
+            UpdateBoostButton();
+            UpdateMiningAudioState();
+        }
+
+        private void ConfirmExitDuringRun()
+        {
+            paused = false;
+            if (pauseOverlay != null)
+            {
+                pauseOverlay.SetActive(false);
+            }
+
+            // The interrupted run still consumes one daily attempt (횟수 차감).
+            MiningAbandoned?.Invoke();
+            Close();
+        }
+
         private void HandleReplayButton()
         {
+            MiningRewardAccepted?.Invoke();
+
             // When attempts remain this replays; once "오늘 탐사 완료" it returns to main.
             if (remainingAttempts > 0)
             {
@@ -816,7 +902,7 @@ namespace StarForge.Presentation
                 return;
             }
 
-            bool show = state == MiningState.Running;
+            bool show = state == MiningState.Running && !paused;
             if (boostButton.gameObject.activeSelf != show)
             {
                 boostButton.gameObject.SetActive(show);
@@ -1827,11 +1913,13 @@ namespace StarForge.Presentation
             bool shouldPlayEngine =
                 soundEnabled &&
                 state == MiningState.Running &&
+                !paused &&
                 !boosting &&
                 engineAudioSource.clip != null;
             bool shouldPauseEngine =
                 soundEnabled &&
                 state == MiningState.Running &&
+                !paused &&
                 boosting &&
                 engineAudioSource.clip != null;
 
@@ -1866,7 +1954,7 @@ namespace StarForge.Presentation
                 engineAudioPausedForBoost = false;
             }
 
-            if ((!soundEnabled || state != MiningState.Running) &&
+            if ((!soundEnabled || state != MiningState.Running || paused) &&
                 boosterAudioSource != null)
             {
                 boosterAudioSource.Stop();
@@ -1906,7 +1994,7 @@ namespace StarForge.Presentation
             exitRect.anchorMax = new Vector2(0.25f, 0.965f);
             exitRect.offsetMin = Vector2.zero;
             exitRect.offsetMax = Vector2.zero;
-            exitButton.onClick.AddListener(Close);
+            exitButton.onClick.AddListener(HandleExitButton);
 
             Text title = CreateText(
                 "우주선 비행",
@@ -2214,7 +2302,8 @@ namespace StarForge.Presentation
 
             for (int i = 0; i < resultRewardIcons.Length; i++)
             {
-                float slotMin = 0.06f + i * 0.46f;
+                float slotWidth = 0.94f / resultRewardIcons.Length;
+                float slotMin = 0.03f + i * slotWidth;
                 GameObject iconObject = new GameObject(
                     "Reward Icon " + i,
                     typeof(RectTransform),
@@ -2224,20 +2313,22 @@ namespace StarForge.Presentation
                 icon.preserveAspect = true;
                 RectTransform iconRect = icon.rectTransform;
                 iconRect.anchorMin = new Vector2(slotMin, 0.08f);
-                iconRect.anchorMax = new Vector2(slotMin + 0.13f, 0.62f);
+                iconRect.anchorMax = new Vector2(slotMin + 0.09f, 0.62f);
                 iconRect.offsetMin = Vector2.zero;
                 iconRect.offsetMax = Vector2.zero;
                 resultRewardIcons[i] = icon;
 
                 Text amount = CreateText(
                     string.Empty,
-                    20,
+                    17,
                     FontStyle.Bold,
                     TextAnchor.MiddleLeft,
                     rewardPanel.transform);
                 RectTransform amountRect = amount.GetComponent<RectTransform>();
-                amountRect.anchorMin = new Vector2(slotMin + 0.14f, 0.08f);
-                amountRect.anchorMax = new Vector2(slotMin + 0.44f, 0.62f);
+                amountRect.anchorMin = new Vector2(slotMin + 0.1f, 0.08f);
+                amountRect.anchorMax = new Vector2(
+                    slotMin + slotWidth - 0.01f,
+                    0.62f);
                 amountRect.offsetMin = Vector2.zero;
                 amountRect.offsetMax = Vector2.zero;
                 amount.color = new Color(0.92f, 0.97f, 1f, 1f);
@@ -2357,6 +2448,82 @@ namespace StarForge.Presentation
             confirmButton.onClick.AddListener(() => SetNewRecordVisible(false));
 
             newRecordOverlay.SetActive(false);
+        }
+
+        private void BuildPauseOverlay(RectTransform root)
+        {
+            pauseOverlay = CreatePanel(
+                "Mining Pause Overlay",
+                root,
+                new Color(0.002f, 0.006f, 0.018f, 0.88f));
+            Stretch(pauseOverlay.GetComponent<RectTransform>());
+
+            GameObject card = CreateFramedPanel(
+                "Pause Card",
+                pauseOverlay.transform,
+                new Color(0.02f, 0.045f, 0.09f, 0.99f),
+                new Color(0.16f, 0.58f, 0.88f, 1f));
+            RectTransform cardRect = card.GetComponent<RectTransform>();
+            cardRect.anchorMin = new Vector2(0.12f, 0.33f);
+            cardRect.anchorMax = new Vector2(0.88f, 0.67f);
+            cardRect.offsetMin = Vector2.zero;
+            cardRect.offsetMax = Vector2.zero;
+
+            Text title = CreateText(
+                "정말 나가시겠습니까?",
+                30,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                card.transform);
+            RectTransform titleRect = title.GetComponent<RectTransform>();
+            titleRect.anchorMin = new Vector2(0.08f, 0.66f);
+            titleRect.anchorMax = new Vector2(0.92f, 0.88f);
+            titleRect.offsetMin = Vector2.zero;
+            titleRect.offsetMax = Vector2.zero;
+            title.color = new Color(0.95f, 0.98f, 1f, 1f);
+
+            Text body = CreateText(
+                "지금 나가면 이번 탐사 횟수는 차감됩니다.",
+                19,
+                FontStyle.Bold,
+                TextAnchor.MiddleCenter,
+                card.transform);
+            RectTransform bodyRect = body.GetComponent<RectTransform>();
+            bodyRect.anchorMin = new Vector2(0.08f, 0.48f);
+            bodyRect.anchorMax = new Vector2(0.92f, 0.64f);
+            bodyRect.offsetMin = Vector2.zero;
+            bodyRect.offsetMax = Vector2.zero;
+            body.color = new Color(1f, 0.78f, 0.42f, 1f);
+
+            Button continueButton = CreateButton("이어서 진행하기", 24, card.transform);
+            RectTransform continueRect = continueButton.GetComponent<RectTransform>();
+            continueRect.anchorMin = new Vector2(0.08f, 0.26f);
+            continueRect.anchorMax = new Vector2(0.92f, 0.44f);
+            continueRect.offsetMin = Vector2.zero;
+            continueRect.offsetMax = Vector2.zero;
+            continueButton.onClick.AddListener(ResumeFromPause);
+
+            Image continueFrame = continueButton.image;
+            if (continueFrame != null)
+            {
+                continueFrame.color = new Color(0f, 0.52f, 0.95f, 0.98f);
+            }
+
+            Text continueText = continueButton.GetComponentInChildren<Text>();
+            if (continueText != null)
+            {
+                continueText.color = Color.white;
+            }
+
+            Button exitConfirmButton = CreateButton("나가기", 23, card.transform);
+            RectTransform exitConfirmRect = exitConfirmButton.GetComponent<RectTransform>();
+            exitConfirmRect.anchorMin = new Vector2(0.08f, 0.06f);
+            exitConfirmRect.anchorMax = new Vector2(0.92f, 0.22f);
+            exitConfirmRect.offsetMin = Vector2.zero;
+            exitConfirmRect.offsetMax = Vector2.zero;
+            exitConfirmButton.onClick.AddListener(ConfirmExitDuringRun);
+
+            pauseOverlay.SetActive(false);
         }
 
         // ----------------------------------------------------------------- UI state
@@ -2548,28 +2715,35 @@ namespace StarForge.Presentation
 
         private static void GetGrade(float score, out string grade, out Color color)
         {
-            if (score >= 0.995f)
+            if (score >= 1f)
+            {
+                grade = "비행의 신";
+                color = new Color(1f, 0.72f, 0.2f, 1f);
+                return;
+            }
+
+            if (score >= 0.5f)
             {
                 grade = "완벽한 비행";
                 color = new Color(1f, 0.84f, 0.3f, 1f);
                 return;
             }
 
-            if (score >= 0.9f)
+            if (score >= 0.3f)
             {
                 grade = "매우 좋음";
                 color = new Color(0.7f, 0.92f, 1f, 1f);
                 return;
             }
 
-            if (score >= 0.7f)
+            if (score >= 0.2f)
             {
                 grade = "좋음";
                 color = new Color(0.3f, 0.88f, 1f, 1f);
                 return;
             }
 
-            if (score >= 0.4f)
+            if (score >= 0.1f)
             {
                 grade = "보통";
                 color = new Color(1f, 0.7f, 0.28f, 1f);
@@ -2754,11 +2928,12 @@ namespace StarForge.Presentation
                 new Color(0.1f, 0.48f, 0.78f, 1f));
             Button button = buttonObject.AddComponent<Button>();
             button.targetGraphic = buttonObject.transform.Find("Fill").GetComponent<Image>();
+            buttonObject.AddComponent<StarForgeButtonPress>();
 
             ColorBlock colors = button.colors;
             colors.normalColor = Color.white;
             colors.highlightedColor = new Color(1.15f, 1.15f, 1.15f, 1f);
-            colors.pressedColor = new Color(0.72f, 0.82f, 0.92f, 1f);
+            colors.pressedColor = new Color(0.55f, 0.72f, 0.92f, 1f);
             colors.disabledColor = new Color(0.35f, 0.42f, 0.5f, 0.78f);
             button.colors = colors;
 

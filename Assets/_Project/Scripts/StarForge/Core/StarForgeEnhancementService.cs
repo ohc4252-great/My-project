@@ -7,25 +7,55 @@ namespace StarForge.Core
     public sealed class StarForgeEnhancementService
     {
         private const float BaseDestructionChancePercent = 0f;
-        private const float DestructionChancePerFracturePercent = 10f;
+        private const float DestructionChancePerFracturePercent = 5f;
         private const float MaximumOutcomeChancePercent = 100f;
 
         public StarForgeEnhancementResult TryEnhance(
             StarForgeSaveData saveData,
             StarForgeBalance balance,
             StarForgeCurrencyType currencyType,
-            Func<float> roll01)
+            Func<float> roll01,
+            bool? overrideDiscovery = null)
         {
             StarForgeEnhancementResult result = new StarForgeEnhancementResult();
             result.selectedCurrency = currencyType;
             result.previousLevel = saveData.currentLevel;
             result.newLevel = saveData.currentLevel;
+            result.previousBlackHoleLevel = saveData.blackHoleLevel;
+            result.newBlackHoleLevel = saveData.blackHoleLevel;
+
+            if (saveData.isBlackHole)
+            {
+                ApplyBlackHoleEnhancement(saveData, balance, roll01, result);
+                return result;
+            }
 
             if (saveData.currentLevel >= balance.maxLevel)
             {
                 result.kind = StarForgeResultKind.MaxLevel;
                 result.message = "이미 최종 단계입니다.";
                 return result;
+            }
+
+            // Eligible normal attempt: tick the hidden pity counter and decide
+            // discovery. The controller may pre-roll the discovery (so it can force
+            // the cinematic past the skip toggle); otherwise decide it here.
+            if (StarForgeBlackHoleRules.CanDiscoverFromNormalLevel(
+                    saveData.currentLevel,
+                    balance.maxLevel))
+            {
+                saveData.blackHoleDiscoveryAttemptCount =
+                    Math.Max(0, saveData.blackHoleDiscoveryAttemptCount) + 1;
+                bool discoverBlackHole = overrideDiscovery
+                    ?? (saveData.blackHoleDiscoveryAttemptCount >=
+                            StarForgeBlackHoleRules.DiscoveryAttemptThreshold ||
+                        RollPercent(roll01) <=
+                            StarForgeBlackHoleRules.DiscoveryChancePercent);
+                if (discoverBlackHole)
+                {
+                    ApplyBlackHoleDiscovery(saveData, result);
+                    return result;
+                }
             }
 
             AttemptBalance attempt = balance.GetAttempt(saveData.currentLevel);
@@ -66,6 +96,28 @@ namespace StarForge.Core
             StarForgeAttemptPreview preview = new StarForgeAttemptPreview();
             preview.level = saveData.currentLevel;
             preview.currencyType = currencyType;
+
+            if (saveData.isBlackHole)
+            {
+                preview.isBlackHole = true;
+                preview.blackHoleLevel = saveData.blackHoleLevel;
+                preview.isAvailable = true;
+                preview.isMaxLevel =
+                    saveData.blackHoleLevel >= StarForgeBlackHoleRules.MaxLevel;
+                preview.hasEnoughCurrency = true;
+                preview.cost = 0;
+                preview.successRatePercent =
+                    StarForgeBlackHoleRules.GetSuccessRatePercent(
+                        saveData.blackHoleLevel);
+                preview.destructionChancePercent =
+                    preview.isMaxLevel
+                        ? 0f
+                        : MaximumOutcomeChancePercent -
+                          preview.successRatePercent;
+                preview.fractureChancePercent = 0f;
+                return preview;
+            }
+
             preview.isMaxLevel = saveData.currentLevel >= balance.maxLevel;
 
             AttemptBalance attempt = balance.GetAttempt(saveData.currentLevel);
@@ -87,6 +139,142 @@ namespace StarForge.Core
             preview.destructionChancePercent =
                 distribution.destructionChancePercent;
             return preview;
+        }
+
+        // Pure predicate (no state mutation): would this normal-level enhancement
+        // attempt discover a black hole, given a 0..1 roll value? Lets the controller
+        // decide up front so the discovery cinematic can be forced past the skip toggle.
+        public bool WouldDiscoverBlackHole(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance,
+            float roll01Value)
+        {
+            if (saveData == null ||
+                balance == null ||
+                saveData.isBlackHole ||
+                saveData.currentLevel >= balance.maxLevel ||
+                !StarForgeBlackHoleRules.CanDiscoverFromNormalLevel(
+                    saveData.currentLevel,
+                    balance.maxLevel))
+            {
+                return false;
+            }
+
+            // Hidden pity: guaranteed once this attempt reaches the threshold.
+            if (Math.Max(0, saveData.blackHoleDiscoveryAttemptCount) + 1 >=
+                StarForgeBlackHoleRules.DiscoveryAttemptThreshold)
+            {
+                return true;
+            }
+
+            return Math.Max(0f, Math.Min(1f, roll01Value)) * 100f <=
+                   StarForgeBlackHoleRules.DiscoveryChancePercent;
+        }
+
+        private static void ApplyBlackHoleDiscovery(
+            StarForgeSaveData saveData,
+            StarForgeEnhancementResult result)
+        {
+            // Remember the planet we had so it can be restored when the black hole
+            // ends (disassemble or 소멸) instead of being wiped to 0강.
+            saveData.blackHolePreviousLevel = saveData.currentLevel;
+            saveData.blackHolePreviousShape = saveData.planetShape;
+
+            saveData.isBlackHole = true;
+            saveData.blackHoleLevel = StarForgeBlackHoleRules.MinLevel;
+            saveData.highestBlackHoleLevel = Math.Max(
+                saveData.highestBlackHoleLevel,
+                saveData.blackHoleLevel);
+            saveData.currentLevel = 0;
+            saveData.blackHoleDiscoveryAttemptCount = 0;
+            saveData.ResetFractures();
+            saveData.RecordSuccessOutcome(false);
+            saveData.attemptCount++;
+
+            result.kind = StarForgeResultKind.Success;
+            result.discoveredBlackHole = true;
+            result.isBlackHole = true;
+            result.levelGain = 1;
+            result.newLevel = 0;
+            result.newBlackHoleLevel = saveData.blackHoleLevel;
+            result.successRatePercent = MaximumOutcomeChancePercent;
+            result.cost = 0;
+            result.message = "블랙홀을 발견했습니다.";
+        }
+
+        private static void ApplyBlackHoleEnhancement(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance,
+            Func<float> roll01,
+            StarForgeEnhancementResult result)
+        {
+            result.isBlackHole = true;
+            result.cost = 0;
+            result.successRatePercent =
+                StarForgeBlackHoleRules.GetSuccessRatePercent(
+                    saveData.blackHoleLevel);
+
+            if (saveData.blackHoleLevel >= StarForgeBlackHoleRules.MaxLevel)
+            {
+                result.kind = StarForgeResultKind.MaxLevel;
+                result.message = "이미 블랙홀 최종 단계입니다.";
+                return;
+            }
+
+            saveData.attemptCount++;
+            if (RollPercent(roll01) <= result.successRatePercent)
+            {
+                int previousLevel = saveData.blackHoleLevel;
+                saveData.blackHoleLevel = Math.Min(
+                    StarForgeBlackHoleRules.MaxLevel,
+                    saveData.blackHoleLevel + 1);
+                saveData.highestBlackHoleLevel = Math.Max(
+                    saveData.highestBlackHoleLevel,
+                    saveData.blackHoleLevel);
+                saveData.RecordSuccessOutcome(false);
+
+                result.kind = StarForgeResultKind.Success;
+                result.levelGain = saveData.blackHoleLevel - previousLevel;
+                result.newBlackHoleLevel = saveData.blackHoleLevel;
+                result.message =
+                    "블랙홀 강화 성공! " +
+                    saveData.blackHoleLevel +
+                    "강에 도달했습니다.";
+                return;
+            }
+
+            ApplyBlackHoleDestroyed(saveData, balance, roll01, result);
+        }
+
+        private static void ApplyBlackHoleDestroyed(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance,
+            Func<float> roll01,
+            StarForgeEnhancementResult result)
+        {
+            result.kind = StarForgeResultKind.Destroyed;
+            result.isBlackHole = true;
+            result.rewards = null;
+            result.previousBlackHoleLevel = saveData.blackHoleLevel;
+            result.newBlackHoleLevel = 0;
+            result.message = "블랙홀이 소멸했습니다. 이전 행성 단계로 복귀합니다.";
+
+            // The black hole vanishes, but the player's original planet is restored
+            // rather than wiped — return to the stage/shape held before discovery.
+            saveData.isBlackHole = false;
+            saveData.blackHoleLevel = 0;
+            saveData.currentLevel = saveData.blackHolePreviousLevel;
+            saveData.planetShape = saveData.blackHolePreviousShape;
+            saveData.blackHolePreviousLevel = 0;
+            saveData.blackHolePreviousShape = (int)StarForgePlanetShape.Default;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                saveData.currentLevel,
+                balance.maxLevel);
+            saveData.ResetFractures();
+            saveData.RecordDestructionOutcome();
+
+            result.newLevel = saveData.currentLevel;
         }
 
         private static void ApplySuccess(
@@ -116,7 +304,8 @@ namespace StarForge.Core
                 newLevel,
                 balance.maxLevel);
             saveData.ResetFractures();
-            saveData.successCount++;
+            saveData.RecordSuccessOutcome(
+                result.kind == StarForgeResultKind.GreatSuccess);
 
             result.message = result.kind == StarForgeResultKind.GreatSuccess
                 ? "융합 대성공! +" + result.levelGain + "강 상승"
@@ -180,6 +369,7 @@ namespace StarForge.Core
             if (outcomeRoll < failureChance)
             {
                 result.kind = StarForgeResultKind.Failure;
+                saveData.RecordFailureOutcome();
                 result.message = saveData.isFractured
                     ? "실패. 균열 상태가 유지됩니다."
                     : "일반 실패. 단계는 유지됩니다.";
@@ -189,6 +379,7 @@ namespace StarForge.Core
             if (outcomeRoll < failureChance + fractureChance)
             {
                 saveData.AddFracture();
+                saveData.RecordFractureOutcome();
                 result.kind = StarForgeResultKind.Fracture;
                 result.message =
                     "균열 발생. 누적 " +
@@ -204,6 +395,7 @@ namespace StarForge.Core
             }
 
             result.kind = StarForgeResultKind.Failure;
+            saveData.RecordFailureOutcome();
             result.message = "일반 실패. 단계는 유지됩니다.";
         }
 
@@ -238,7 +430,7 @@ namespace StarForge.Core
 
             saveData.currentLevel = 0;
             saveData.ResetFractures();
-            saveData.destructionCount++;
+            saveData.RecordDestructionOutcome();
 
             result.newLevel = 0;
             result.message = "소멸. 남은 재료를 회수했습니다.";
@@ -252,6 +444,15 @@ namespace StarForge.Core
         {
             StarForgeDisassembleResult result = new StarForgeDisassembleResult();
             result.level = saveData.currentLevel;
+
+            if (saveData.isBlackHole)
+            {
+                return TryDisassembleBlackHole(
+                    saveData,
+                    balance,
+                    roll01,
+                    result);
+            }
 
             if (saveData.currentLevel <= 0)
             {
@@ -296,7 +497,57 @@ namespace StarForge.Core
             StarForgeSaveData saveData,
             StarForgeBalance balance)
         {
+            if (saveData != null && saveData.isBlackHole)
+            {
+                return StarForgeBlackHoleRules.GetDisassembleRewards(
+                    saveData.blackHoleLevel);
+            }
+
             return BuildDisassembleRewards(saveData, balance);
+        }
+
+        private static StarForgeDisassembleResult TryDisassembleBlackHole(
+            StarForgeSaveData saveData,
+            StarForgeBalance balance,
+            Func<float> roll01,
+            StarForgeDisassembleResult result)
+        {
+            result.isBlackHole = true;
+            result.level = saveData.blackHoleLevel;
+            result.rewards =
+                StarForgeBlackHoleRules.GetDisassembleRewards(
+                    saveData.blackHoleLevel);
+
+            for (int i = 0; i < result.rewards.Length; i++)
+            {
+                CurrencyAmount reward = result.rewards[i];
+                if (reward != null)
+                {
+                    saveData.AddCurrency(reward.type, reward.amount);
+                }
+            }
+
+            result.previousShape = (StarForgePlanetShape)saveData.planetShape;
+
+            // Disassembling the black hole returns the player's original planet
+            // (stage + shape held before discovery) instead of rolling a fresh 0강.
+            saveData.isBlackHole = false;
+            saveData.blackHoleLevel = 0;
+            saveData.currentLevel = saveData.blackHolePreviousLevel;
+            saveData.planetShape = saveData.blackHolePreviousShape;
+            saveData.blackHolePreviousLevel = 0;
+            saveData.blackHolePreviousShape = (int)StarForgePlanetShape.Default;
+            saveData.RecordPlanetProgress(
+                (StarForgePlanetShape)saveData.planetShape,
+                saveData.currentLevel,
+                balance.maxLevel);
+            saveData.ResetFractures();
+
+            result.newShape = (StarForgePlanetShape)saveData.planetShape;
+            result.success = true;
+            result.message =
+                "블랙홀을 분해해 재료를 회수하고 이전 행성으로 돌아왔습니다.";
+            return result;
         }
 
         private static CurrencyAmount[] BuildDisassembleRewards(
@@ -446,8 +697,12 @@ namespace StarForge.Core
     {
         public StarForgeResultKind kind;
         public StarForgeCurrencyType selectedCurrency;
+        public bool isBlackHole;
+        public bool discoveredBlackHole;
         public int previousLevel;
         public int newLevel;
+        public int previousBlackHoleLevel;
+        public int newBlackHoleLevel;
         public int levelGain;
         public int cost;
         public float successRatePercent;
@@ -460,6 +715,7 @@ namespace StarForge.Core
     public sealed class StarForgeDisassembleResult
     {
         public bool success;
+        public bool isBlackHole;
         public int level;
         public CurrencyAmount[] rewards;
         public StarForgePlanetShape previousShape;
@@ -471,6 +727,8 @@ namespace StarForge.Core
     {
         public int level;
         public StarForgeCurrencyType currencyType;
+        public bool isBlackHole;
+        public int blackHoleLevel;
         public bool isAvailable;
         public bool isMaxLevel;
         public bool hasEnoughCurrency;
