@@ -52,6 +52,8 @@ namespace StarForge.Presentation
         private readonly Image[] exchangeTargetIcons = new Image[8];
         private Font font;
         private Sprite[] materialIconSprites;
+        private readonly Dictionary<string, Sprite> hudButtonSprites =
+            new Dictionary<string, Sprite>();
         private Sprite fallbackMaterialIcon;
         private Text levelText;
         private Outline levelTextOutline;
@@ -93,7 +95,6 @@ namespace StarForge.Presentation
         private int pendingExchangeRouteIndex = -1;
         private Button collectionOpenButton;
         private Button miningOpenButton;
-        private Text miningOpenButtonText;
         private GameObject collectionPanel;
         private Text collectionTitleText;
         private RawImage collectionPlanetImage;
@@ -447,19 +448,7 @@ namespace StarForge.Presentation
                 return;
             }
 
-            int clampedRemaining = Mathf.Max(0, remaining);
-            bool canWatchAd = remainingAdBonuses > 0;
-            miningOpenButton.interactable =
-                !isBusy &&
-                (clampedRemaining > 0 || canWatchAd);
-            if (miningOpenButtonText != null)
-            {
-                miningOpenButtonText.text = clampedRemaining > 0
-                    ? "별 탐사하기\n오늘 " + clampedRemaining + "회"
-                    : canWatchAd
-                        ? "별 탐사하기\n광고 추가 탐험"
-                        : "별 탐사하기\n오늘 완료";
-            }
+            miningOpenButton.interactable = !isBusy;
         }
 
         private void OnDestroy()
@@ -838,7 +827,7 @@ namespace StarForge.Presentation
                 new Color(0.12f, 0.58f, 0.92f, 0.98f),
                 2f);
             Text label = CreateText(
-                "스킵",
+                "연출",
                 17,
                 FontStyle.Bold,
                 TextAnchor.MiddleCenter,
@@ -896,8 +885,7 @@ namespace StarForge.Presentation
 
         private void BuildSettingsButton(RectTransform root)
         {
-            miningOpenButton = CreateButton("별 탐사하기\n오늘 3회", 20, root);
-            miningOpenButtonText = miningOpenButton.GetComponentInChildren<Text>();
+            miningOpenButton = CreateButton("별 탐사하기", 20, root);
             RectTransform miningRect = miningOpenButton.GetComponent<RectTransform>();
             miningRect.anchorMin = new Vector2(0.03f, 0.895f);
             miningRect.anchorMax = new Vector2(0.254f, 0.965f);
@@ -908,10 +896,7 @@ namespace StarForge.Presentation
                 new Color(0.03f, 0.13f, 0.28f, 0.99f),
                 new Color(0.08f, 0.62f, 1f, 1f),
                 new Color(0.4f, 0.8f, 1f, 1f));
-            if (miningOpenButtonText != null)
-            {
-                miningOpenButtonText.lineSpacing = 0.82f;
-            }
+            ApplyHudNavigationButtonImage(miningOpenButton, "search");
             miningOpenButton.onClick.AddListener(() => MiningRequested?.Invoke());
 
             exchangeOpenButton = CreateButton("재료 교환", 20, root);
@@ -925,6 +910,7 @@ namespace StarForge.Presentation
                 new Color(0.018f, 0.055f, 0.12f, 0.99f),
                 new Color(0.24f, 0.3f, 0.38f, 1f),
                 new Color(0.78f, 0.86f, 0.98f, 1f));
+            ApplyHudNavigationButtonImage(exchangeOpenButton, "change");
             exchangeOpenButton.onClick.AddListener(OpenExchangePanel);
 
             collectionOpenButton = CreateButton("도감", 20, root);
@@ -938,6 +924,7 @@ namespace StarForge.Presentation
                 new Color(0.018f, 0.055f, 0.12f, 0.99f),
                 new Color(0.24f, 0.3f, 0.38f, 1f),
                 new Color(0.78f, 0.86f, 0.98f, 1f));
+            ApplyHudNavigationButtonImage(collectionOpenButton, "dogam");
             collectionOpenButton.onClick.AddListener(OpenCollectionPanel);
 
             Button settingsButton = CreateButton("설정", 20, root);
@@ -951,7 +938,105 @@ namespace StarForge.Presentation
                 new Color(0.018f, 0.055f, 0.12f, 0.99f),
                 new Color(0.24f, 0.3f, 0.38f, 1f),
                 new Color(0.78f, 0.86f, 0.98f, 1f));
+            ApplyHudNavigationButtonImage(settingsButton, "setting");
             settingsButton.onClick.AddListener(() => settingsPanel.SetActive(true));
+        }
+
+        private void ApplyHudNavigationButtonImage(
+            Button button,
+            string spriteName)
+        {
+            if (button == null)
+            {
+                return;
+            }
+
+            Sprite sprite = GetHudButtonSprite(spriteName);
+            Image image = button.targetGraphic as Image;
+            if (image == null)
+            {
+                image = button.GetComponent<Image>();
+            }
+
+            if (image != null && sprite != null)
+            {
+                image.sprite = sprite;
+                image.type = Image.Type.Simple;
+                image.preserveAspect = true;
+                image.color = Color.white;
+                image.raycastTarget = true;
+                button.targetGraphic = image;
+            }
+
+            Image rootImage = button.GetComponent<Image>();
+            if (rootImage != null && rootImage != image)
+            {
+                rootImage.color = new Color(1f, 1f, 1f, 0f);
+                rootImage.raycastTarget = false;
+            }
+
+            Transform sheen = button.transform.Find("Space Frame Sheen");
+            if (sheen != null)
+            {
+                sheen.gameObject.SetActive(false);
+            }
+
+            Outline outline = button.GetComponent<Outline>();
+            if (outline != null)
+            {
+                outline.enabled = false;
+            }
+
+            Text label = button.GetComponentInChildren<Text>(true);
+            if (label != null)
+            {
+                label.gameObject.SetActive(false);
+            }
+        }
+
+        private Sprite GetHudButtonSprite(string spriteName)
+        {
+            if (hudButtonSprites.TryGetValue(spriteName, out Sprite cached))
+            {
+                return cached;
+            }
+
+            string path = "HudButtons/" + spriteName;
+            Texture2D texture = Resources.Load<Texture2D>(path);
+            Sprite sprite = null;
+            if (texture != null)
+            {
+                sprite = Sprite.Create(
+                    texture,
+                    GetHudButtonCropRect(texture),
+                    new Vector2(0.5f, 0.5f),
+                    100f,
+                    0,
+                    SpriteMeshType.FullRect);
+                sprite.name = "StarForge HUD " + spriteName + " Button";
+            }
+
+            if (sprite == null)
+            {
+                sprite = Resources.Load<Sprite>(path);
+            }
+
+            hudButtonSprites[spriteName] = sprite;
+            return sprite;
+        }
+
+        private static Rect GetHudButtonCropRect(Texture2D texture)
+        {
+            const float cropX = 63f;
+            const float cropY = 246f;
+            const float cropWidth = 1410f;
+            const float cropHeight = 556f;
+
+            float x = Mathf.Min(cropX, Mathf.Max(0f, texture.width - 1f));
+            float y = Mathf.Min(cropY, Mathf.Max(0f, texture.height - 1f));
+            float width = Mathf.Min(cropWidth, texture.width - x);
+            float height = Mathf.Min(cropHeight, texture.height - y);
+            return new Rect(x, y, width, height);
         }
 
         private void BuildMaterialPanel(RectTransform root, StarForgeBalance balance)
@@ -1249,8 +1334,8 @@ namespace StarForge.Presentation
                 1.25f);
             LayoutElement rewardRowLayout =
                 resultRewardRow.AddComponent<LayoutElement>();
-            rewardRowLayout.minHeight = 28f;
-            rewardRowLayout.preferredHeight = 28f;
+            rewardRowLayout.minHeight = 96f;
+            rewardRowLayout.preferredHeight = 96f;
             HorizontalLayoutGroup rewardLayout =
                 resultRewardRow.AddComponent<HorizontalLayoutGroup>();
             rewardLayout.padding = new RectOffset(12, 12, 2, 2);
@@ -1272,14 +1357,22 @@ namespace StarForge.Presentation
                     new Color(0.008f, 0.03f, 0.065f, 0.96f),
                     new Color(0.05f, 0.28f, 0.48f, 0.78f),
                     1f);
-                HorizontalLayoutGroup slotLayout =
-                    rewardSlot.AddComponent<HorizontalLayoutGroup>();
-                slotLayout.padding = new RectOffset(5, 5, 1, 1);
-                slotLayout.spacing = 3f;
+                LayoutElement slotElement =
+                    rewardSlot.AddComponent<LayoutElement>();
+                slotElement.minWidth = 58f;
+                slotElement.preferredWidth = 68f;
+                slotElement.flexibleWidth = 1f;
+                slotElement.minHeight = 86f;
+                slotElement.preferredHeight = 86f;
+
+                VerticalLayoutGroup slotLayout =
+                    rewardSlot.AddComponent<VerticalLayoutGroup>();
+                slotLayout.padding = new RectOffset(4, 4, 6, 5);
+                slotLayout.spacing = 0f;
                 slotLayout.childAlignment = TextAnchor.MiddleCenter;
                 slotLayout.childControlWidth = true;
                 slotLayout.childControlHeight = true;
-                slotLayout.childForceExpandWidth = false;
+                slotLayout.childForceExpandWidth = true;
                 slotLayout.childForceExpandHeight = false;
 
                 GameObject iconObject = new GameObject(
@@ -1290,23 +1383,24 @@ namespace StarForge.Presentation
                 iconObject.transform.SetParent(rewardSlot.transform, false);
                 LayoutElement iconLayout =
                     iconObject.GetComponent<LayoutElement>();
-                iconLayout.minWidth = 55f;
-                iconLayout.preferredWidth = 55f;
-                iconLayout.minHeight = 55f;
-                iconLayout.preferredHeight = 55f;
+                iconLayout.minWidth = 42f;
+                iconLayout.preferredWidth = 42f;
+                iconLayout.minHeight = 42f;
+                iconLayout.preferredHeight = 42f;
                 Image icon = iconObject.GetComponent<Image>();
                 icon.preserveAspect = true;
                 resultRewardIcons[i] = icon;
 
                 Text amount = CreateText(
                     "+0",
-                    25,
+                    18,
                     FontStyle.Bold,
-                    TextAnchor.MiddleLeft,
+                    TextAnchor.MiddleCenter,
                     rewardSlot.transform);
+                SetPreferredHeight(amount, 26f);
                 amount.resizeTextForBestFit = true;
-                amount.resizeTextMinSize = 16;
-                amount.resizeTextMaxSize = 25;
+                amount.resizeTextMinSize = 10;
+                amount.resizeTextMaxSize = 18;
                 amount.color = new Color(1f, 0.76f, 0.3f, 1f);
                 resultRewardTexts[i] = amount;
             }
@@ -1362,8 +1456,8 @@ namespace StarForge.Presentation
                 root,
                 new Color(0.008f, 0.025f, 0.055f, 0.99f));
             RectTransform rect = settingsPanel.GetComponent<RectTransform>();
-            rect.anchorMin = new Vector2(0.08f, 0.1f);
-            rect.anchorMax = new Vector2(0.92f, 0.9f);
+            rect.anchorMin = new Vector2(0.1f, 0.1f);
+            rect.anchorMax = new Vector2(0.9f, 0.9f);
             rect.offsetMin = Vector2.zero;
             rect.offsetMax = Vector2.zero;
             ApplyCanvasFrame(

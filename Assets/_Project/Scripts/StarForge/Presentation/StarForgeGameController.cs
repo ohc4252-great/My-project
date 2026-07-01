@@ -183,14 +183,6 @@ namespace StarForge.Presentation
 
             int remainingPlays = GetRemainingMiningPlays();
             int remainingAdBonuses = GetRemainingMiningAdBonuses();
-            if (remainingPlays <= 0 && remainingAdBonuses <= 0)
-            {
-                hudView.ShowMessage(
-                    "오늘의 별 탐사 완료",
-                    "오늘 기본 탐사를 모두 사용했습니다.");
-                return;
-            }
-
             miningGameView.Open(remainingPlays, remainingAdBonuses);
             audioController.SetMiningModeActive(true);
         }
