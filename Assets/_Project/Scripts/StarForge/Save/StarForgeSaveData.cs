@@ -55,6 +55,11 @@ namespace StarForge.Save
         // losing the black hole restores the player's planet instead of wiping it.
         public int blackHolePreviousLevel;
         public int blackHolePreviousShape;
+        // Up to 3 keep-level revive ads per planet "life": each time the player spends
+        // an ad to keep a destroyed stage this increments; once it hits the cap the
+        // option is withheld until a new star begins (checkpoint revive, 0강 재시작, or a
+        // voluntary disassemble), which resets it to 0.
+        public int keepLevelAdUses;
         public string[] completedAchievementIds;
         // Achievements whose rewards the player has manually claimed (subset of
         // completed). Completed-but-not-claimed = a reward waiting to be received.
@@ -109,6 +114,7 @@ namespace StarForge.Save
             data.blackHoleDiscoveryAttemptCount = 0;
             data.blackHolePreviousLevel = 0;
             data.blackHolePreviousShape = (int)StarForgePlanetShape.Default;
+            data.keepLevelAdUses = 0;
             data.completedAchievementIds = new string[0];
             data.claimedAchievementIds = new string[0];
             data.currencies = CreateCurrencyArray(firstLaunchMeteorFragments);
@@ -149,6 +155,19 @@ namespace StarForge.Save
         {
             fractureCount = 0;
             isFractured = false;
+        }
+
+        // Keep-level revive ad: up to this many uses per planet life.
+        public const int KeepLevelAdMaxUsesPerLife = 3;
+
+        public bool CanUseKeepLevelAd()
+        {
+            return Math.Max(0, keepLevelAdUses) < KeepLevelAdMaxUsesPerLife;
+        }
+
+        public int RemainingKeepLevelAds()
+        {
+            return Math.Max(0, KeepLevelAdMaxUsesPerLife - Math.Max(0, keepLevelAdUses));
         }
 
         public void NormalizeAchievementCounters()

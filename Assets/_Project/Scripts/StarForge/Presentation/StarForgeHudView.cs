@@ -34,6 +34,8 @@ namespace StarForge.Presentation
         public event Action<Vector2> CameraOrbitDragged;
         public event Action<int> ReviveRequested;
         public event Action RewardedReviveRequested;
+        // Player dismissed the revive overlay to start over at 0강 (a new star life).
+        public event Action ReviveDismissed;
         public event Action DisassembleRequested;
         public event Action MiningRequested;
         public event Action<string> AchievementClaimRequested;
@@ -152,7 +154,6 @@ namespace StarForge.Presentation
         private int reviveDestroyedLevel;
         private Button rewardedReviveButton;
         private Text rewardedReviveButtonText;
-        private Coroutine reviveAdCooldownRoutine;
         private bool isBuilt;
         private Sprite chamferedUiSprite;
         private RawImage spaceBackdropImage;
@@ -4204,66 +4205,35 @@ namespace StarForge.Presentation
                 StarForgeFormat.CurrencyList(result.rewards) +
                 "</color></size>";
             RefreshReviveRows(saveData);
-            SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
+            // Up to 3 keep-level ads per star life: hide the option once all are spent on
+            // this planet. It returns when a new star begins (checkpoint revive, 0강
+            // 재시작, or a voluntary disassemble) — the controller resets the counter.
+            bool keepAdAvailable = saveData != null && saveData.CanUseKeepLevelAd();
+            if (rewardedReviveButton != null)
+            {
+                rewardedReviveButton.gameObject.SetActive(keepAdAvailable);
+            }
+
+            if (keepAdAvailable)
+            {
+                SetRewardedReviveButtonState(
+                    true,
+                    "광고 보고 현 단계 유지 (남은 " +
+                    saveData.RemainingKeepLevelAds() + "회)");
+            }
+
             revivePanel.SetActive(true);
             UpdateEnhanceButtonInteractable();
         }
 
         public void HideReviveOverlay()
         {
-            StopReviveAdCooldownCountdown();
             if (revivePanel != null)
             {
                 revivePanel.SetActive(false);
             }
 
             UpdateEnhanceButtonInteractable();
-        }
-
-        // Drives the rewarded-revive button: when the planet-keep ad is on cooldown
-        // the button is disabled and shows a live M:SS countdown until it expires.
-        public void SetReviveAdCooldown(float remainingSeconds)
-        {
-            StopReviveAdCooldownCountdown();
-            if (remainingSeconds <= 0f)
-            {
-                SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
-                return;
-            }
-
-            reviveAdCooldownRoutine =
-                StartCoroutine(ReviveAdCooldownCountdown(remainingSeconds));
-        }
-
-        private void StopReviveAdCooldownCountdown()
-        {
-            if (reviveAdCooldownRoutine != null)
-            {
-                StopCoroutine(reviveAdCooldownRoutine);
-                reviveAdCooldownRoutine = null;
-            }
-        }
-
-        private IEnumerator ReviveAdCooldownCountdown(float remainingSeconds)
-        {
-            float remaining = remainingSeconds;
-            while (remaining > 0f)
-            {
-                SetRewardedReviveButtonState(
-                    false,
-                    "광고 쿨타임 " + FormatCooldownClock(remaining));
-                yield return new WaitForSecondsRealtime(1f);
-                remaining -= 1f;
-            }
-
-            reviveAdCooldownRoutine = null;
-            SetRewardedReviveButtonState(true, "광고 보고 현 단계 유지");
-        }
-
-        private static string FormatCooldownClock(float remainingSeconds)
-        {
-            int total = Mathf.Max(0, Mathf.CeilToInt(remainingSeconds));
-            return (total / 60) + ":" + (total % 60).ToString("00");
         }
 
         public void SetRewardedReviveButtonState(
@@ -4551,7 +4521,11 @@ namespace StarForge.Presentation
             restartColors.selectedColor = restartColors.highlightedColor;
             restartButton.colors = restartColors;
             SetButtonTextColor(restartButton, new Color(1f, 0.84f, 0.82f, 1f));
-            restartButton.onClick.AddListener(HideReviveOverlay);
+            restartButton.onClick.AddListener(() =>
+            {
+                HideReviveOverlay();
+                ReviveDismissed?.Invoke();
+            });
 
             rewardedReviveButton = CreateButton(
                 "광고 보고 현 단계 유지",

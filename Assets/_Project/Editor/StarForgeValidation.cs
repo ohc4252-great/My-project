@@ -33,7 +33,7 @@ namespace StarForge.Editor
             ValidateMaterialExchangeRoutes(exchangeService, balance);
             ValidateMaterialExchangeUnlocks(exchangeService, balance);
             ValidateMaterialExchangeQuantity(exchangeService, balance);
-            ValidatePrimordialDailyLimit(exchangeService, balance);
+            ValidatePrimordialUnlimitedExchange(exchangeService, balance);
             ValidateCollectionStages(balance);
             ValidateAchievements(achievementService, balance);
 
@@ -98,20 +98,19 @@ namespace StarForge.Editor
             Require(!result.discoveredBlackHole, "1% 초과 롤에서 블랙홀이 발견되었습니다.");
             Require(!save.isBlackHole, "1% 초과 롤에서 저장 상태가 블랙홀로 변경되었습니다.");
 
-            // 천장(pity): 임계치 도달 시 굴림과 무관하게 반드시 발견.
-            StarForgeSaveData pity = CreateRichSave(balance);
-            pity.currentLevel = 20;
-            pity.blackHoleDiscoveryAttemptCount =
-                StarForgeBlackHoleRules.DiscoveryAttemptThreshold - 1;
-            StarForgeEnhancementResult pityResult = service.TryEnhance(
-                pity,
+            // 천장(pity) 삭제: 누적 시도 횟수가 아무리 많아도 1% 초과 롤이면 발견되지 않아야 한다.
+            StarForgeSaveData noPity = CreateRichSave(balance);
+            noPity.currentLevel = 20;
+            noPity.blackHoleDiscoveryAttemptCount =
+                StarForgeBlackHoleRules.DiscoveryAttemptThreshold * 5;
+            StarForgeEnhancementResult noPityResult = service.TryEnhance(
+                noPity,
                 balance,
                 StarForgeCurrencyType.MeteorFragment,
                 new SequenceRoller(0.99f).Next);
-            Require(pityResult.discoveredBlackHole, "천장 도달 시 블랙홀이 발견되어야 합니다.");
             Require(
-                pity.blackHoleDiscoveryAttemptCount == 0,
-                "블랙홀 발견 후 천장 카운터가 초기화되어야 합니다.");
+                !noPityResult.discoveredBlackHole,
+                "천장 삭제 후에는 누적 시도와 무관하게 1% 초과 롤에서 발견되면 안 됩니다.");
         }
 
         private static void ValidateBlackHoleEnhancementAndDisassemble(
@@ -165,11 +164,11 @@ namespace StarForge.Editor
             Require(disassemble.isBlackHole, "블랙홀 분해 결과 플래그 누락");
             Require(
                 save.GetCurrency(StarForgeCurrencyType.PrimordialStar) ==
-                100000 + 10,
+                100000 + 3,
                 "블랙홀 1강 원초의 별 분해 보상 실패");
             Require(
                 save.GetCurrency(StarForgeCurrencyType.SingularityShard) ==
-                100000 + 50,
+                100000 + 16,
                 "블랙홀 1강 특이성 조각 분해 보상 실패");
         }
 
@@ -372,35 +371,35 @@ namespace StarForge.Editor
             }
         }
 
-        private static void ValidatePrimordialDailyLimit(
+        private static void ValidatePrimordialUnlimitedExchange(
             StarForgeMaterialExchangeService service,
             StarForgeBalance balance)
         {
-            DateTime firstDay = new DateTime(2026, 6, 11);
-            DateTime nextDay = firstDay.AddDays(1);
+            DateTime testDate = new DateTime(2026, 6, 11);
             const int routeIndex = 6;
             StarForgeMaterialExchangeRoute route = service.GetRoute(routeIndex);
             StarForgeSaveData save = CreateRichSave(balance);
             save.highestLevel = 30;
 
             Require(
-                service.TryExchange(
-                    save,
-                    routeIndex,
-                    route.dailyLimit,
-                    firstDay).success,
-                "원초의 별 일일 제한 내 복수 교환이 실패했습니다.");
+                route.dailyLimit == 0,
+                "원초의 별 교환 일일 제한이 제거되지 않았습니다.");
+            Require(
+                service.GetRemainingDailyExchanges(save, routeIndex, testDate) ==
+                    int.MaxValue,
+                "원초의 별 무제한 교환의 남은 횟수가 무제한으로 계산되지 않았습니다.");
 
             int before = save.GetCurrency(route.sourceType);
             Require(
-                !service.TryExchange(save, routeIndex, firstDay).success,
-                "원초의 별 일일 제한을 초과했습니다.");
+                service.TryExchange(save, routeIndex, 5, testDate).success,
+                "원초의 별 무제한 복수 교환이 실패했습니다.");
             Require(
-                save.GetCurrency(route.sourceType) == before,
-                "일일 제한 초과 실패가 재료를 차감했습니다.");
+                save.GetCurrency(route.sourceType) ==
+                    before - route.sourceAmount * 5,
+                "원초의 별 무제한 복수 교환 재료 차감이 올바르지 않습니다.");
             Require(
-                service.TryExchange(save, routeIndex, nextDay).success,
-                "날짜 변경 후 원초의 별 교환 횟수가 초기화되지 않았습니다.");
+                service.TryExchange(save, routeIndex, testDate).success,
+                "원초의 별 같은 날짜 추가 교환이 실패했습니다.");
         }
 
         private static void ValidateMaterialExchangeQuantity(
@@ -474,7 +473,7 @@ namespace StarForge.Editor
             StarForgeBalance balance)
         {
             Require(
-                service.GetDefinitions().Length == 85,
+                service.GetDefinitions().Length == 90,
                 "업적 정의 수가 예상과 다릅니다.");
             Require(
                 service.GetNormalLevelDefinition(5)?.achievementName ==
@@ -521,9 +520,9 @@ namespace StarForge.Editor
                 normalSave.GetCurrency(StarForgeCurrencyType.PureCoreShard) ==
                 1590 &&
                 normalSave.GetCurrency(
-                    StarForgeCurrencyType.SingularityShard) == 43 &&
+                    StarForgeCurrencyType.SingularityShard) == 143 &&
                 normalSave.GetCurrency(StarForgeCurrencyType.PrimordialStar) ==
-                75,
+                60,
                 "30강 누적 업적 보상이 올바르지 않습니다.");
 
             StarForgeSaveData specialSave =

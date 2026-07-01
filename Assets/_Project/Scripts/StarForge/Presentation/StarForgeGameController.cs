@@ -11,7 +11,9 @@ namespace StarForge.Presentation
     {
         private const float PlanetVerticalOffsetPixels = 50f;
         private const int BaseDailyMiningLimit = 3;
-        private const int DailyMiningAdBonusLimit = 5;
+        // Effectively unlimited: 3 free explorations/day, then keep flying via ads with
+        // no daily ceiling (the climb is paced by playtime, not a daily cap).
+        private const int DailyMiningAdBonusLimit = 999;
         private const float CameraOrbitDegreesPerPixel = 0.22f;
         private const float CameraOrbitPitchLimit = 55f;
         private const float BlackHoleDefaultCameraPitch = 10f;
@@ -20,11 +22,6 @@ namespace StarForge.Presentation
             "destruction_keep_level";
         private const string MiningBonusPlacement =
             "mining_bonus_attempt";
-        // Self-imposed throttle on the planet-keep revive ad so repeated views in a
-        // short window don't trip AdMob's serving limits.
-        private const float ReviveAdCooldownSeconds = 180f;
-        private const string ReviveAdCooldownPrefKey =
-            "StarForge.ReviveAd.CooldownUntilBinary";
         [Header("Optional Overrides")]
         [SerializeField] private TextAsset balanceJson;
         [SerializeField] private Camera targetCamera;
@@ -129,6 +126,7 @@ namespace StarForge.Presentation
             hudView.ReviveRequested += HandleReviveRequested;
             hudView.RewardedReviveRequested +=
                 HandleRewardedReviveRequested;
+            hudView.ReviveDismissed += HandleReviveDismissed;
             hudView.DisassembleRequested += HandleDisassembleRequested;
             hudView.MiningRequested += HandleMiningRequested;
             hudView.AchievementClaimRequested +=
@@ -397,6 +395,9 @@ namespace StarForge.Presentation
 
         private static CurrencyAmount[] BuildMiningRewards(float normalizedScore)
         {
+            // Flight rewards doubled vs. the original table: exploration is now an
+            // unlimited (ad-gated) currency faucet, so the 30강 climb is paced by
+            // playtime spent flying rather than a daily cap.
             float score = Mathf.Clamp01(normalizedScore);
             if (score >= 1f)
             {
@@ -404,17 +405,30 @@ namespace StarForge.Presentation
                 {
                     new CurrencyAmount(
                         StarForgeCurrencyType.PureCoreShard,
-                        100),
+                        200),
                     new CurrencyAmount(
                         StarForgeCurrencyType.SingularityShard,
-                        5),
+                        10),
                     new CurrencyAmount(
                         StarForgeCurrencyType.PrimordialStar,
-                        1)
+                        2)
                 };
             }
 
             if (score >= 0.5f)
+            {
+                return new[]
+                {
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.PureCoreShard,
+                        200),
+                    new CurrencyAmount(
+                        StarForgeCurrencyType.SingularityShard,
+                        4)
+                };
+            }
+
+            if (score >= 0.3f)
             {
                 return new[]
                 {
@@ -427,32 +441,19 @@ namespace StarForge.Presentation
                 };
             }
 
-            if (score >= 0.3f)
-            {
-                return new[]
-                {
-                    new CurrencyAmount(
-                        StarForgeCurrencyType.PureCoreShard,
-                        50),
-                    new CurrencyAmount(
-                        StarForgeCurrencyType.SingularityShard,
-                        1)
-                };
-            }
-
             if (score >= 0.2f)
             {
                 return new[]
                 {
                     new CurrencyAmount(
                         StarForgeCurrencyType.MeteorFragment,
-                        500),
+                        1000),
                     new CurrencyAmount(
                         StarForgeCurrencyType.StarShard,
-                        150),
+                        300),
                     new CurrencyAmount(
                         StarForgeCurrencyType.PureCoreShard,
-                        15)
+                        30)
                 };
             }
 
@@ -462,13 +463,13 @@ namespace StarForge.Presentation
                 {
                     new CurrencyAmount(
                         StarForgeCurrencyType.MeteorFragment,
-                        200),
+                        400),
                     new CurrencyAmount(
                         StarForgeCurrencyType.StarShard,
-                        100),
+                        200),
                     new CurrencyAmount(
                         StarForgeCurrencyType.PureCoreShard,
-                        5)
+                        10)
                 };
             }
 
@@ -476,10 +477,10 @@ namespace StarForge.Presentation
             {
                 new CurrencyAmount(
                     StarForgeCurrencyType.MeteorFragment,
-                    100),
+                    200),
                 new CurrencyAmount(
                     StarForgeCurrencyType.StarShard,
-                    30)
+                    60)
             };
         }
 
@@ -780,7 +781,6 @@ namespace StarForge.Presentation
                     lastDestroyedLevel = result.previousLevel;
                     pendingDestroyedResult = result;
                     hudView.ShowReviveOverlay(result, saveData);
-                    hudView.SetReviveAdCooldown(GetReviveAdCooldownRemaining());
                 }
             }
             else if (result.kind == StarForgeResultKind.Fracture)
@@ -854,7 +854,6 @@ namespace StarForge.Presentation
                     lastDestroyedLevel = result.previousLevel;
                     pendingDestroyedResult = result;
                     hudView.ShowReviveOverlay(result, saveData);
-                    hudView.SetReviveAdCooldown(GetReviveAdCooldownRemaining());
                 }
             }
             else if (result.kind == StarForgeResultKind.Fracture)
@@ -1173,6 +1172,8 @@ namespace StarForge.Presentation
             if (result.success)
             {
                 pendingDestroyedResult = null;
+                // New star at the checkpoint → the keep-level ad is available again.
+                ResetKeepLevelAd();
                 saveRepository.Save(saveData);
                 RefreshViews();
                 StartCameraMove(GetRestCameraZ(saveData.currentLevel), 0.6f);
@@ -1192,19 +1193,27 @@ namespace StarForge.Presentation
             }
         }
 
+        // Player closed the revive overlay to begin again at 0강, so a new star life
+        // starts with the keep-level ad uses refreshed.
+        private void HandleReviveDismissed()
+        {
+            pendingDestroyedResult = null;
+            lastDestroyedLevel = 0;
+            if (saveData.keepLevelAdUses > 0)
+            {
+                ResetKeepLevelAd();
+                saveRepository.Save(saveData);
+            }
+
+            RefreshViews();
+        }
+
         private void HandleRewardedReviveRequested()
         {
             if (isResolving ||
                 rewardedAdInProgress ||
                 pendingDestroyedResult == null)
             {
-                return;
-            }
-
-            float cooldownRemaining = GetReviveAdCooldownRemaining();
-            if (cooldownRemaining > 0f)
-            {
-                hudView.SetReviveAdCooldown(cooldownRemaining);
                 return;
             }
 
@@ -1233,9 +1242,6 @@ namespace StarForge.Presentation
                         return;
                     }
 
-                    // A real impression happened; start the 3-minute throttle.
-                    StartReviveAdCooldown();
-
                     StarForgeEnhancementResult destroyedResult =
                         pendingDestroyedResult;
                     StarForgeReviveResult reviveResult =
@@ -1245,8 +1251,9 @@ namespace StarForge.Presentation
                             destroyedResult.rewards);
                     if (!reviveResult.success)
                     {
-                        hudView.SetReviveAdCooldown(
-                            GetReviveAdCooldownRemaining());
+                        hudView.SetRewardedReviveButtonState(
+                            true,
+                            "광고 보고 현 단계 유지");
                         hudView.ShowMessage(
                             "단계 유지 실패",
                             reviveResult.message);
@@ -1255,6 +1262,10 @@ namespace StarForge.Presentation
 
                     pendingDestroyedResult = null;
                     lastDestroyedLevel = 0;
+                    // Spend one of this star's keep-level ads (up to 3 per life). The
+                    // option returns once a new star begins (checkpoint revive, 0강
+                    // 재시작, or disassemble).
+                    saveData.keepLevelAdUses++;
                     saveRepository.Save(saveData);
                     hudView.HideReviveOverlay();
                     RefreshViews();
@@ -1274,39 +1285,10 @@ namespace StarForge.Presentation
                 });
         }
 
-        // Remaining seconds before the planet-keep revive ad can be watched again.
-        // Persisted as wall-clock so it survives app restarts (mirrors AdMob's limit).
-        private float GetReviveAdCooldownRemaining()
+        // A new star begins: re-arm the keep-level ads (up to 3) for the fresh planet.
+        private void ResetKeepLevelAd()
         {
-            string stored = PlayerPrefs.GetString(ReviveAdCooldownPrefKey, string.Empty);
-            if (string.IsNullOrEmpty(stored) ||
-                !long.TryParse(stored, out long untilBinary))
-            {
-                return 0f;
-            }
-
-            System.DateTime until;
-            try
-            {
-                until = System.DateTime.FromBinary(untilBinary);
-            }
-            catch (System.ArgumentException)
-            {
-                return 0f;
-            }
-
-            double remaining = (until - System.DateTime.UtcNow).TotalSeconds;
-            return remaining > 0d ? (float)remaining : 0f;
-        }
-
-        private void StartReviveAdCooldown()
-        {
-            System.DateTime until =
-                System.DateTime.UtcNow.AddSeconds(ReviveAdCooldownSeconds);
-            PlayerPrefs.SetString(
-                ReviveAdCooldownPrefKey,
-                until.ToBinary().ToString());
-            PlayerPrefs.Save();
+            saveData.keepLevelAdUses = 0;
         }
 
         private void HandleResetConfirmed()
@@ -1451,6 +1433,13 @@ namespace StarForge.Presentation
 
             StarForgeAchievementUnlock[] achievements =
                 achievementService.CompleteAvailable(saveData);
+            // A normal disassemble starts a fresh 0강 star → restore the keep-level ad.
+            // A black-hole disassemble just returns the prior planet, so leave it as-is.
+            if (!result.isBlackHole)
+            {
+                ResetKeepLevelAd();
+            }
+
             saveRepository.Save(saveData);
             int disassembleEffectLevel = result.isBlackHole ? 29 : result.level;
             audioController.PlayResult(

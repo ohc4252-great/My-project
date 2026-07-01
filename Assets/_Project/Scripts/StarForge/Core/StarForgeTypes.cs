@@ -102,8 +102,9 @@ namespace StarForge.Core
         public const int MaxLevel = 10;
         public const int DiscoveryMinNormalLevel = 20;
         public const float DiscoveryChancePercent = 1f;
-        // Hidden pity ("천장"): a guaranteed discovery after this many eligible
-        // attempts. Presented identically to a natural 1% discovery.
+        // Pity ceiling removed — discovery is now purely the flat 1% roll. This value is
+        // retained only as the upper clamp bound for the (now-vestigial) attempt counter
+        // so existing saves stay in range.
         public const int DiscoveryAttemptThreshold = 100;
 
         public static bool CanDiscoverFromNormalLevel(
@@ -137,33 +138,36 @@ namespace StarForge.Core
             int clampedLevel = Math.Max(
                 MinLevel,
                 Math.Min(MaxLevel, blackHoleLevel));
+            // Rewards boosted ~1.6x to speed the 25~29강 endgame supply of 원초의 별
+            // (lets players keep using the highest-success material) without touching
+            // success rates. Targets a ~30h (≈5일) median climb to 30강.
             int primordialStarAmount;
             int singularityShardAmount;
             switch (clampedLevel)
             {
                 case 1:
-                    primordialStarAmount = 2;
-                    singularityShardAmount = 10;
+                    primordialStarAmount = 3;
+                    singularityShardAmount = 16;
                     break;
                 case 2:
-                    primordialStarAmount = 4;
-                    singularityShardAmount = 25;
+                    primordialStarAmount = 6;
+                    singularityShardAmount = 40;
                     break;
                 case 3:
-                    primordialStarAmount = 8;
-                    singularityShardAmount = 50;
+                    primordialStarAmount = 13;
+                    singularityShardAmount = 80;
                     break;
                 case 4:
-                    primordialStarAmount = 20;
-                    singularityShardAmount = 160;
+                    primordialStarAmount = 32;
+                    singularityShardAmount = 256;
                     break;
                 case 5:
-                    primordialStarAmount = 25;
-                    singularityShardAmount = 220;
+                    primordialStarAmount = 40;
+                    singularityShardAmount = 352;
                     break;
                 default:
-                    primordialStarAmount = 5 * (clampedLevel + 1);
-                    singularityShardAmount = 50 * clampedLevel;
+                    primordialStarAmount = 8 * (clampedLevel + 1);
+                    singularityShardAmount = 80 * clampedLevel;
                     break;
             }
 

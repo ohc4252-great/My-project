@@ -46,10 +46,10 @@ namespace StarForge.Core
             {
                 saveData.blackHoleDiscoveryAttemptCount =
                     Math.Max(0, saveData.blackHoleDiscoveryAttemptCount) + 1;
+                // Pity ceiling removed: discovery is purely the flat 1% roll, no
+                // guaranteed discovery after N attempts.
                 bool discoverBlackHole = overrideDiscovery
-                    ?? (saveData.blackHoleDiscoveryAttemptCount >=
-                            StarForgeBlackHoleRules.DiscoveryAttemptThreshold ||
-                        RollPercent(roll01) <=
+                    ?? (RollPercent(roll01) <=
                             StarForgeBlackHoleRules.DiscoveryChancePercent);
                 if (discoverBlackHole)
                 {
@@ -160,13 +160,7 @@ namespace StarForge.Core
                 return false;
             }
 
-            // Hidden pity: guaranteed once this attempt reaches the threshold.
-            if (Math.Max(0, saveData.blackHoleDiscoveryAttemptCount) + 1 >=
-                StarForgeBlackHoleRules.DiscoveryAttemptThreshold)
-            {
-                return true;
-            }
-
+            // Pity ceiling removed: a discovery only happens on the flat 1% roll.
             return Math.Max(0f, Math.Min(1f, roll01Value)) * 100f <=
                    StarForgeBlackHoleRules.DiscoveryChancePercent;
         }
@@ -820,7 +814,7 @@ namespace StarForge.Core
                 StarForgeCurrencyType.PrimordialStar,
                 1,
                 25,
-                3),
+                0),
             new StarForgeMaterialExchangeRoute(
                 StarForgeCurrencyType.PrimordialStar,
                 1,
