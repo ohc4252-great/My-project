@@ -16,13 +16,13 @@
 - Unity: `6000.4.4f1`
 - Bundle ID: `com.starforge.stellarsmith`
 - Marketing version: `1.0.0`
-- 현재 iOS build number: `1`
+- 현재 iOS build number: `2`
 - iOS minimum target: `15.0`
 - Scripting backend: iOS 빌드 준비 코드에서 `IL2CPP`로 설정
 - 방향: 세로 고정
 - Google Mobile Ads Unity package: `com.google.ads.mobile` `11.2.0`
 
-중요: App Store Connect에는 이미 `1.0 (1)`이 제출된 이력이 있으므로, 재제출 전 iOS build number를 `2` 이상으로 올려야 한다. 현재 `ProjectSettings/ProjectSettings.asset`의 `buildNumber.iPhone`은 아직 `1`이다.
+중요: App Store Connect에는 이미 `1.0 (1)`이 제출된 이력이 있으므로, 재제출 빌드는 `2` 이상이어야 한다. 현재 `ProjectSettings/ProjectSettings.asset`의 `buildNumber.iPhone`은 `2`다. App Store Connect에 build `2`를 이미 올린 이력이 생겼다면 새 빌드 전에 `3` 이상으로 올린다.
 
 ## 3. 절대 확인할 AdMob 값
 
@@ -69,6 +69,7 @@ ITSAppUsesNonExemptEncryption = false
 - 업적 보상 수령 결과 팝업에서 보상 수량을 아이콘 오른쪽이 아니라 아이콘 아래로 배치했다.
 - 업적 보상 5개 동시 수령 케이스에서 슬롯과 수량이 잘리지 않아야 한다.
 - 강화 연출 체크 UI 문구가 `스킵`에서 `연출`로 바뀐 상태다.
+- 블랙홀 등장 시 강화 연출 사운드는 28-30강 구간의 고급 연출 사운드를 사용한다.
 
 ## 5. 빌드 전 작업트리 정리
 
@@ -104,7 +105,7 @@ Assets/ChatGPT Image ... -Photoroom.png
 Assets/별 탐사하기-Photoroom.png
 ```
 
-현재 `ProjectSettings/ProjectSettings.asset` 변경은 Android `versionCode` 12 -> 13만 보인다. iOS 빌드와 직접 관련 없으므로, 이 변경을 포함할지는 별도 판단한다.
+`origin/main` 기준 `ProjectSettings/ProjectSettings.asset`에는 iOS build number `2`가 반영되어 있다. Windows 로컬 작업트리에 Android `versionCode` 추가 변경이 보이면 iOS 빌드와 직접 관련 없으므로 포함 여부를 별도 판단한다.
 원본 이미지 파일이 `Assets/` 루트에 중복으로 남아 있으면 앱 용량과 커밋 노이즈가 늘어난다. 실제 런타임은 `Assets/_Project/Resources/HudButtons/` 경로를 사용한다.
 
 ## 6. 빌드 순서

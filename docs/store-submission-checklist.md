@@ -1,6 +1,6 @@
 # 별 강화하기 스토어 제출 체크리스트
 
-기준일: 2026-06-19
+기준일: 2026-07-01
 
 이 문서는 현재 앱 구조를 기준으로 한다.
 
@@ -8,7 +8,7 @@
 - 서버 저장 없음
 - Google AdMob 보상형 광고 있음
 - 게임 진행/설정/약관 동의는 PlayerPrefs 로컬 저장
-- 출시 버전: Android `versionName 1.0.0` / `versionCode 1`, iOS `1.0.0 (1)`
+- 출시 버전: Android `versionName 1.0.0`, iOS `1.0.0 (2)`
 - 출시 저장 키는 `StarForge.SaveData.v2`이며, 기존 테스트 저장 데이터는 출시 데이터로 이관하지 않는다.
 - Android App ID: `ca-app-pub-3971219491693844~8174680087`
 - iOS App ID: `ca-app-pub-3971219491693844~2351507763`
