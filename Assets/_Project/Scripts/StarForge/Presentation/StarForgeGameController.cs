@@ -17,6 +17,7 @@ namespace StarForge.Presentation
         private const float CameraOrbitDegreesPerPixel = 0.22f;
         private const float CameraOrbitPitchLimit = 55f;
         private const float BlackHoleDefaultCameraPitch = 10f;
+        private const int BlackHoleDiscoveryAudioLevel = 28;
         private const string MiningDateFormat = "yyyy-MM-dd";
         private const string DestructionKeepPlacement =
             "destruction_keep_level";
@@ -598,8 +599,14 @@ namespace StarForge.Presentation
                 yield break;
             }
 
-            float fallbackChargeDuration = Mathf.Min(0.45f + attemptLevel * 0.03f, 1.3f);
-            float chargeDuration = audioController.GetChargeDuration(attemptLevel, fallbackChargeDuration);
+            int enhancementAudioLevel =
+                GetEnhancementAudioLevel(attemptLevel, willDiscoverBlackHole);
+            float fallbackChargeDuration =
+                Mathf.Min(0.45f + enhancementAudioLevel * 0.03f, 1.3f);
+            float chargeDuration =
+                audioController.GetChargeDuration(
+                    enhancementAudioLevel,
+                    fallbackChargeDuration);
             int shardCount = Mathf.Clamp(10 + attemptLevel + Mathf.RoundToInt(chargeDuration * 6f), 12, 64);
             float effectIntensity = 1f + attemptLevel * 0.045f;
             bool useHighTierSuccessTransition =
@@ -609,7 +616,7 @@ namespace StarForge.Presentation
                 attemptLevel == 29;
 
             Transform planetTarget = planetView.Target;
-            audioController.PlayCharge(attemptLevel);
+            audioController.PlayCharge(enhancementAudioLevel);
             planetView.PlayChargePulse(chargeDuration);
 
             // 강화 시작: 행성 쪽으로 줌 인 (충전 동안 행성은 떨림)
@@ -647,7 +654,9 @@ namespace StarForge.Presentation
                 if (result.kind == StarForgeResultKind.Success ||
                     result.kind == StarForgeResultKind.GreatSuccess)
                 {
-                    audioController.PlayResult(result.kind, attemptLevel);
+                    audioController.PlayResult(
+                        result.kind,
+                        GetEnhancementAudioLevel(result, attemptLevel));
                     resultAudioPlayedEarly = true;
                 }
 
@@ -714,7 +723,9 @@ namespace StarForge.Presentation
                 // 성공: 1.3^상승단계 만큼 부풀어 오르고, 그에 맞춰 카메라가 줌 아웃
                 if (!resultAudioPlayedEarly)
                 {
-                    audioController.PlayResult(result.kind, attemptLevel);
+                    audioController.PlayResult(
+                        result.kind,
+                        GetEnhancementAudioLevel(result, attemptLevel));
                 }
 
                 effectController.PlayResult(result.kind, planetTarget.position, effectIntensity);
@@ -737,7 +748,9 @@ namespace StarForge.Presentation
 
                 if (!resultAudioPlayedEarly)
                 {
-                    audioController.PlayResult(result.kind, attemptLevel);
+                    audioController.PlayResult(
+                        result.kind,
+                        GetEnhancementAudioLevel(result, attemptLevel));
                 }
 
                 effectController.PlayResult(result.kind, planetTarget.position, effectIntensity);
@@ -823,7 +836,9 @@ namespace StarForge.Presentation
             ApplyPlanetVisual();
             SyncCameraOrbitDefaultForCurrentState();
             SetCameraZ(GetRestCameraZForCurrentState());
-            audioController.PlayResult(result.kind, attemptLevel);
+            audioController.PlayResult(
+                result.kind,
+                GetEnhancementAudioLevel(result, attemptLevel));
 
             if (saveData.vibrationEnabled &&
                 (result.kind == StarForgeResultKind.Destroyed ||
@@ -954,6 +969,24 @@ namespace StarForge.Presentation
             return saveData.isBlackHole
                 ? 29
                 : saveData.currentLevel;
+        }
+
+        private static int GetEnhancementAudioLevel(
+            int attemptLevel,
+            bool willDiscoverBlackHole)
+        {
+            return willDiscoverBlackHole
+                ? BlackHoleDiscoveryAudioLevel
+                : attemptLevel;
+        }
+
+        private static int GetEnhancementAudioLevel(
+            StarForgeEnhancementResult result,
+            int attemptLevel)
+        {
+            return result != null && result.discoveredBlackHole
+                ? BlackHoleDiscoveryAudioLevel
+                : attemptLevel;
         }
 
         private StageVisualConfig GetCurrentVisualStage()
