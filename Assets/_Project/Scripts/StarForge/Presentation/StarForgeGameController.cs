@@ -616,6 +616,7 @@ namespace StarForge.Presentation
                 attemptLevel == 29;
 
             Transform planetTarget = planetView.Target;
+            audioController.SetEnhancementCinematicActive(true);
             audioController.PlayCharge(enhancementAudioLevel);
             planetView.PlayChargePulse(chargeDuration);
 
@@ -772,6 +773,8 @@ namespace StarForge.Presentation
             {
                 planetView.ApplyBlackHoleStage(saveData.blackHoleLevel);
             }
+
+            audioController.SetEnhancementCinematicActive(false);
 
             if (result.kind == StarForgeResultKind.Destroyed)
             {

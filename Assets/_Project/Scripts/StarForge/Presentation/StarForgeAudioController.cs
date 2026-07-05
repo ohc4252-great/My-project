@@ -33,6 +33,7 @@ namespace StarForge.Presentation
         private bool built;
         private bool soundEnabled = true;
         private bool miningModeActive;
+        private bool enhancementCinematicActive;
         private float bgmVolume = 1f;
         private float sfxVolume = 1f;
         private float enhancementAudioMuteUntil;
@@ -67,6 +68,7 @@ namespace StarForge.Presentation
                     }
 
                     enhancementAudioMuteUntil = 0f;
+                    enhancementCinematicActive = false;
                 }
 
                 RefreshBgmVolumes();
@@ -155,6 +157,13 @@ namespace StarForge.Presentation
             }
 
             miningModeActive = active;
+            RefreshBgmVolumes();
+        }
+
+        public void SetEnhancementCinematicActive(bool active)
+        {
+            EnsureCreated();
+            enhancementCinematicActive = active;
             RefreshBgmVolumes();
         }
 
@@ -388,16 +397,45 @@ namespace StarForge.Presentation
 
         private void RefreshBgmVolumes()
         {
+            bool enhancementBgmMuted = IsEnhancementBgmMuted();
+            float mainVolume = enhancementBgmMuted
+                ? 0f
+                : MainBgmVolume * bgmVolume;
+            float miningVolume = enhancementBgmMuted
+                ? 0f
+                : MiningBgmVolume * bgmVolume;
+
             SetLoopVolume(
                 mainBgmSource,
                 soundEnabled && !miningModeActive && !startupMainBgmSuppressed,
-                MainBgmVolume * bgmVolume,
+                mainVolume,
                 startupMainBgmSuppressed);
             SetLoopVolume(
                 miningBgmSource,
                 soundEnabled && miningModeActive,
-                MiningBgmVolume * bgmVolume,
+                miningVolume,
                 true);
+        }
+
+        private bool IsEnhancementBgmMuted()
+        {
+            if (enhancementCinematicActive)
+            {
+                return true;
+            }
+
+            if (enhancementAudioMuteUntil <= 0f)
+            {
+                return false;
+            }
+
+            if (Time.unscaledTime < enhancementAudioMuteUntil)
+            {
+                return true;
+            }
+
+            enhancementAudioMuteUntil = 0f;
+            return false;
         }
 
         private static void SetLoopVolume(
